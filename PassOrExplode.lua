@@ -236,25 +236,20 @@ RunService.Heartbeat:Connect(function(dt)
         teleportTimer = 0
     end
 
-    -- Auto Pass Bomb: directly face + walk toward target every frame
-    -- Bypasses MoveTo acceleration curve so movement is instant full-speed,
-    -- matching manual joystick feel without the internal deceleration window
+    -- Auto Pass Bomb: overshoot MoveTo so Humanoid never reaches the goal
+    -- and never enters the internal deceleration zone near the destination.
+    -- We target a point slightly PAST the player (dir * overshoot) so the
+    -- pathfinder stays in full-sprint state every frame.
     if cfg.AutoPassBomb and not cfg.BombTeleport and holding then
         local target, dist = nearestPlayer()
         if target and target.Character then
             local oh = getHRP(target.Character)
             if oh and dist > STOP_DIST then
-                -- Face target (Y-locked so we don't tilt up/down on height diff)
-                local lookAt = Vector3.new(oh.Position.X, r.Position.Y, oh.Position.Z)
-                r.CFrame = CFrame.new(r.Position, lookAt)
-                -- Drive movement via MoveDirection — full speed, no ramp-up
-                h:Move(Vector3.new(
-                    oh.Position.X - r.Position.X,
-                    0,
-                    oh.Position.Z - r.Position.Z
-                ).Unit, false)
-            else
-                h:Move(Vector3.new(0, 0, 0), false)
+                local dir = (oh.Position - r.Position)
+                local dirXZ = Vector3.new(dir.X, 0, dir.Z)
+                -- Overshoot by 8 studs past target so we never "arrive"
+                local overshoot = oh.Position + dirXZ.Unit * 8
+                h:MoveTo(overshoot)
             end
         end
     end
