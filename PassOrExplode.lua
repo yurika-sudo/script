@@ -250,6 +250,25 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
+    -- Debug label update (inline, no separate loop)
+    do
+        local nearest2, dist2 = nearestPlayer()
+        local distStr = dist2 == math.huge and "--" or string.format("%.1f", dist2)
+        local zoneStr = dist2 <= STOP_DIST and "STOP"
+                     or dist2 <= NEAR_DIST  and "CLOSE"
+                     or "FAR"
+        local count = 0
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and p.Character and getHRP(p.Character) then
+                count = count + 1
+            end
+        end
+        debugLabel.Text = string.format(
+            "dist: %s (%s)\nbomb: %s\nplayers: %d",
+            distStr, zoneStr, holding and "YES" or "no", count
+        )
+    end
+
     -- Auto Punch: enable only when needed (PVP), filters non-arena players
     if cfg.AutoPunch and r then
         local target, dist = nearestPlayer()
