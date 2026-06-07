@@ -26,7 +26,7 @@ local cfg = {
 local moveTimer   = 0
 local punchTimer  = 0
 local flyBP       = nil   -- BodyPosition for fly
-local noFallForce = nil   -- BodyForce for true no-fall
+local noFallBV    = nil   -- BodyVelocity for no-fall (conditional per-frame)
 local ghostActive = false -- noclip state tracking
 
 -- Remotes fetched in background so UI renders immediately (not blocking)
@@ -71,23 +71,25 @@ local function nearestPlayer()
     return best, bestDist
 end
 
--- [BUG 3 FIX] True No Fall via BodyForce that cancels gravity exactly
--- mass × gravity = upward force needed to float perfectly
+-- No Fall via BodyVelocity with conditional MaxForce:
+-- When falling (vel.Y < 0): lock Y velocity to 0 (true no-fall)
+-- When jumping (vel.Y >= 0): MaxForce = 0 (let physics handle jump normally)
+-- This prevents floating up AND keeps jumps working
 local function setupNoFall(enable)
-    local r = getHRP(getChar())
-    if noFallForce then
-        pcall(function() noFallForce:Destroy() end)
-        noFallForce = nil
+    if noFallBV then
+        pcall(function() noFallBV:Destroy() end)
+        noFallBV = nil
     end
-    if enable and r then
-        local bf   = Instance.new("BodyForce")
-        bf.Name    = "NoFallForce"
-        local mass = r.AssemblyMass
-        if mass <= 0 then mass = 20 end  -- fallback if AssemblyMass unavailable
-        -- +30 margin so gravity never wins; won't cause lift since it's not a net upward force
-        bf.Force   = Vector3.new(0, mass * workspace.Gravity + 30, 0)
-        bf.Parent  = r
-        noFallForce = bf
+    if enable then
+        local r = getHRP(getChar())
+        if r then
+            local bv      = Instance.new("BodyVelocity")
+            bv.Name       = "NoFallBV"
+            bv.Velocity   = Vector3.new(0, 0, 0)
+            bv.MaxForce   = Vector3.new(0, 0, 0)  -- starts disabled, activated per-frame
+            bv.Parent     = r
+            noFallBV = bv
+        end
     end
 end
 
@@ -208,8 +210,19 @@ RunService.Heartbeat:Connect(function(dt)
         setNoclip(c, false)
     end
 
-    -- [BUG 3] True No Fall: BodyForce handles it passively, no per-frame velocity hack needed
-    -- setupNoFall handles the physics object; nothing to do here
+    -- No Fall: conditional per-frame control
+    -- Fly takes priority (BodyPosition already handles Y); skip NoFall when flying
+    if cfg.NoFall and noFallBV and r and not cfg.Fly then
+        local vel = r.AssemblyLinearVelocity
+        if vel.Y < 0 then
+            -- Falling: activate lock → zero Y velocity
+            noFallBV.MaxForce = Vector3.new(0, 1e6, 0)
+            noFallBV.Velocity  = Vector3.new(0, 0, 0)
+        else
+            -- Jumping/grounded: disable lock → normal physics
+            noFallBV.MaxForce = Vector3.new(0, 0, 0)
+        end
+    end
 
     -- Fly (only when not suppressed by bomb)
     if cfg.Fly and not (cfg.AutoPassBomb and hasBomb(c)) then
@@ -236,7 +249,7 @@ end)
 
 LocalPlayer.CharacterAdded:Connect(function()
     flyBP       = nil
-    noFallForce = nil
+    noFallBV    = nil
     ghostActive = false
     task.wait(1)
     if cfg.Fly    then setupFly(true) end
@@ -275,7 +288,7 @@ Window:Toggle("Fly Mode", false, function(state)
     cfg.Fly = state
     setupFly(state)
     -- Fly supersedes NoFall (redundant together)
-    if state and noFallForce then
+    if state and noFallBV then
         setupNoFall(false)
         cfg.NoFall = false
     end
