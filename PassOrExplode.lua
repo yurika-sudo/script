@@ -205,18 +205,31 @@ RunService.Heartbeat:Connect(function(dt)
         teleportTimer = 0
     end
 
-    -- Auto Pass Bomb (walk): MoveTo only, refresh faster when close
-    -- Direct velocity was causing overshoot past target (ending up like teleport position)
+    -- Auto Pass Bomb (walk):
+    -- Far  (dist > 10): MoveTo for natural navigation
+    -- Close (dist 4-10): Humanoid:Move() at full WalkSpeed, no deceleration
+    -- Stop (dist <= 4):  Humanoid:Move(zero) to halt
     if cfg.AutoPassBomb and not cfg.BombTeleport and holding then
         local target, dist = nearestPlayer()
         if target and target.Character then
             local oh = getHRP(target.Character)
-            if oh and dist > STOP_DIST then
-                moveTimer = moveTimer + dt
-                local refresh = dist > NEAR_DIST and 0.15 or 0.05
-                if moveTimer >= refresh then
-                    moveTimer = 0
-                    h:MoveTo(oh.Position)
+            if oh then
+                if dist > NEAR_DIST then
+                    moveTimer = moveTimer + dt
+                    if moveTimer >= 0.15 then
+                        moveTimer = 0
+                        h:MoveTo(oh.Position)
+                    end
+                elseif dist > STOP_DIST then
+                    -- Full speed last-mile, no slowdown
+                    local dir = Vector3.new(
+                        oh.Position.X - r.Position.X,
+                        0,
+                        oh.Position.Z - r.Position.Z
+                    ).Unit
+                    h:Move(dir, false)
+                else
+                    h:Move(Vector3.zero, false)
                 end
             end
         end
