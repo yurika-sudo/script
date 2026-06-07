@@ -236,14 +236,25 @@ RunService.Heartbeat:Connect(function(dt)
         teleportTimer = 0
     end
 
-    -- Auto Pass Bomb: call MoveTo every frame so destination is always fresh
-    -- No timer, no deceleration window, no competing Move() calls
+    -- Auto Pass Bomb: directly face + walk toward target every frame
+    -- Bypasses MoveTo acceleration curve so movement is instant full-speed,
+    -- matching manual joystick feel without the internal deceleration window
     if cfg.AutoPassBomb and not cfg.BombTeleport and holding then
         local target, dist = nearestPlayer()
         if target and target.Character then
             local oh = getHRP(target.Character)
             if oh and dist > STOP_DIST then
-                h:MoveTo(oh.Position)
+                -- Face target (Y-locked so we don't tilt up/down on height diff)
+                local lookAt = Vector3.new(oh.Position.X, r.Position.Y, oh.Position.Z)
+                r.CFrame = CFrame.new(r.Position, lookAt)
+                -- Drive movement via MoveDirection — full speed, no ramp-up
+                h:Move(Vector3.new(
+                    oh.Position.X - r.Position.X,
+                    0,
+                    oh.Position.Z - r.Position.Z
+                ).Unit, false)
+            else
+                h:Move(Vector3.new(0, 0, 0), false)
             end
         end
     end
