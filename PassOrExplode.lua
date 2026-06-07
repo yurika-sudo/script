@@ -205,32 +205,14 @@ RunService.Heartbeat:Connect(function(dt)
         teleportTimer = 0
     end
 
-    -- Auto Pass Bomb (walk):
-    -- Far  (dist > 10): MoveTo for natural navigation
-    -- Close (dist 4-10): Humanoid:Move() at full WalkSpeed, no deceleration
-    -- Stop (dist <= 4):  Humanoid:Move(zero) to halt
+    -- Auto Pass Bomb: call MoveTo every frame so destination is always fresh
+    -- No timer, no deceleration window, no competing Move() calls
     if cfg.AutoPassBomb and not cfg.BombTeleport and holding then
         local target, dist = nearestPlayer()
         if target and target.Character then
             local oh = getHRP(target.Character)
-            if oh then
-                if dist > NEAR_DIST then
-                    moveTimer = moveTimer + dt
-                    if moveTimer >= 0.15 then
-                        moveTimer = 0
-                        h:MoveTo(oh.Position)
-                    end
-                elseif dist > STOP_DIST then
-                    -- Full speed last-mile, no slowdown
-                    local dir = Vector3.new(
-                        oh.Position.X - r.Position.X,
-                        0,
-                        oh.Position.Z - r.Position.Z
-                    ).Unit
-                    h:Move(dir, false)
-                else
-                    h:Move(Vector3.zero, false)
-                end
+            if oh and dist > STOP_DIST then
+                h:MoveTo(oh.Position)
             end
         end
     end
@@ -310,3 +292,48 @@ Window:Toggle("Free Fly",        false, function(state)
     if not state and cfg.NoFall then setupNoFall(true) end
 end)
 Window:Toggle("Auto Punch",      false, function(state) cfg.AutoPunch = state; punchTimer = 0 end)
+
+-- Debug overlay: live distance + nearby player count
+local debugGui   = Instance.new("ScreenGui")
+debugGui.Name    = "POEDebug"
+debugGui.ResetOnSpawn = false
+debugGui.Parent  = LocalPlayer.PlayerGui
+
+local debugLabel = Instance.new("TextLabel")
+debugLabel.Size                  = UDim2.new(0, 180, 0, 70)
+debugLabel.Position              = UDim2.new(0, 8, 0.45, 0)
+debugLabel.BackgroundColor3      = Color3.fromRGB(0, 0, 0)
+debugLabel.BackgroundTransparency = 0.45
+debugLabel.TextColor3            = Color3.fromRGB(100, 255, 100)
+debugLabel.TextSize              = 13
+debugLabel.Font                  = Enum.Font.Code
+debugLabel.TextXAlignment        = Enum.TextXAlignment.Left
+debugLabel.TextYAlignment        = Enum.TextYAlignment.Top
+debugLabel.Text                  = "debug: off"
+debugLabel.BorderSizePixel       = 0
+debugLabel.Parent                = debugGui
+
+RunService.Heartbeat:Connect(function()
+    local c2 = getChar(); if not c2 then return end
+    local r2 = getHRP(c2); if not r2 then return end
+    local nearest, dist = nearestPlayer()
+    local distStr = dist == math.huge and "--" or string.format("%.1f", dist)
+    local zoneStr = dist <= STOP_DIST and "STOP"
+                 or dist <= NEAR_DIST  and "CLOSE"
+                 or "FAR"
+    -- count all visible players
+    local count = 0
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character then
+            local oh = getHRP(p.Character)
+            if oh then count = count + 1 end
+        end
+    end
+    local bombStr = hasBomb(c2) and "YES" or "no"
+    debugLabel.Text = string.format(
+        "dist: %s (%s)
+bomb: %s
+players: %d",
+        distStr, zoneStr, bombStr, count
+    )
+end)
