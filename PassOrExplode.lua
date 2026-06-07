@@ -364,3 +364,33 @@ toggleAutoPunch = Window:Toggle("Auto Punch", false, function(state)
     cfg.AutoPunch = state
     punchTimer = 0
 end)
+-- Debug: scan RS + workspace for NumberValue/IntValue/StringValue that might be the bomb timer
+-- Press while holding the bomb, then check F9 console for a value counting down
+Window:Button("Scan Timer Values", function()
+    local found = {}
+
+    local function scanContainer(container, prefix)
+        for _, v in ipairs(container:GetDescendants()) do
+            if v:IsA("NumberValue") or v:IsA("IntValue") or v:IsA("StringValue") then
+                local ok, val = pcall(function() return v.Value end)
+                if ok then
+                    table.insert(found, string.format("[%s] %s | %s = %s",
+                        v.ClassName, prefix, v:GetFullName(), tostring(val)))
+                end
+            end
+        end
+    end
+
+    scanContainer(game:GetService("ReplicatedStorage"), "RS")
+    scanContainer(workspace, "WS")
+
+    if #found == 0 then
+        print("[POE] No values found in RS or workspace")
+    else
+        print(string.format("[POE] Found %d values -- look for one counting down while holding bomb:", #found))
+        for _, line in ipairs(found) do
+            print(line)
+        end
+    end
+    print("[POE] Scan complete.")
+end)
