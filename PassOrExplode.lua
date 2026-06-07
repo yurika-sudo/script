@@ -28,6 +28,9 @@ local SPEED_DEFAULT = 16
 -- Only target players within this distance (filters lobby spectators)
 local MAX_TARGET_DIST = 200
 
+-- Max Y difference to consider a player in the same arena (filters lobby/spectators when NoFall is on)
+local MAX_Y_DIFF = 15
+
 local STOP_DIST   = 4
 local NEAR_DIST   = 10
 local PUNCH_RANGE = 6
@@ -67,17 +70,21 @@ local function hasBomb(c)
 end
 
 -- Filter: only in-round players (alive, within MAX_TARGET_DIST, not spectating)
-local function nearestPlayer()
+-- requireSameHeight: if true, also filters players outside MAX_Y_DIFF vertically
+-- Used by AutoPunch to avoid targeting lobby/spectator players when NoFall lifts us off arena
+local function nearestPlayer(requireSameHeight)
     local c = getChar(); local h = getHRP(c)
     if not h then return nil, math.huge end
     local best, bestDist = nil, math.huge
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer and p.Character then
-            local oh  = getHRP(p.Character)
-            local ph  = getHum(p.Character)
+            local oh = getHRP(p.Character)
+            local ph = getHum(p.Character)
             if oh and ph and ph.Health > 0 then
                 local d = (h.Position - oh.Position).Magnitude
-                if d < bestDist and d <= MAX_TARGET_DIST then
+                local yDiff = math.abs(h.Position.Y - oh.Position.Y)
+                local heightOk = (not requireSameHeight) or (yDiff <= MAX_Y_DIFF)
+                if d < bestDist and d <= MAX_TARGET_DIST and heightOk then
                     bestDist = d
                     best = p
                 end
@@ -156,6 +163,27 @@ local function firePunch(targetChar, targetHRP)
         end
     end)
 end
+
+-- Debug overlay: live distance + nearby player count
+-- Defined before Heartbeat so debugLabel is never nil when the loop runs
+local debugGui   = Instance.new("ScreenGui")
+debugGui.Name    = "POEDebug"
+debugGui.ResetOnSpawn = false
+debugGui.Parent  = LocalPlayer.PlayerGui
+
+local debugLabel = Instance.new("TextLabel")
+debugLabel.Size                   = UDim2.new(0, 180, 0, 70)
+debugLabel.Position               = UDim2.new(0, 8, 0.45, 0)
+debugLabel.BackgroundColor3       = Color3.fromRGB(0, 0, 0)
+debugLabel.BackgroundTransparency = 0.45
+debugLabel.TextColor3             = Color3.fromRGB(100, 255, 100)
+debugLabel.TextSize               = 13
+debugLabel.Font                   = Enum.Font.Code
+debugLabel.TextXAlignment         = Enum.TextXAlignment.Left
+debugLabel.TextYAlignment         = Enum.TextYAlignment.Top
+debugLabel.Text                   = "initializing..."
+debugLabel.BorderSizePixel        = 0
+debugLabel.Parent                 = debugGui
 
 RunService.Heartbeat:Connect(function(dt)
     local c = getChar(); local h = getHum(c)
@@ -250,31 +278,13 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- Debug label update (inline, no separate loop)
-    do
-        local nearest2, dist2 = nearestPlayer()
-        local distStr = dist2 == math.huge and "--" or string.format("%.1f", dist2)
-        local zoneStr = dist2 <= STOP_DIST and "STOP"
-                     or dist2 <= NEAR_DIST  and "CLOSE"
-                     or "FAR"
-        local count = 0
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p ~= LocalPlayer and p.Character and getHRP(p.Character) then
-                count = count + 1
-            end
-        end
-        debugLabel.Text = string.format(
-            "dist: %s (%s)\nbomb: %s\nplayers: %d",
-            distStr, zoneStr, holding and "YES" or "no", count
-        )
-    end
-
-    -- Auto Punch: enable only when needed (PVP), filters non-arena players
+    -- Auto Punch: requireSameHeight=true to avoid targeting lobby/spectator players
+    -- especially when NoFall keeps us elevated above the arena floor
     if cfg.AutoPunch and r then
-        local target, dist = nearestPlayer()
+        local target, dist = nearestPlayer(true)
         if target and target.Character then
             local oh = getHRP(target.Character)
-            if oh and r.Position.Y - oh.Position.Y <= 12 then
+            if oh then
                 if dist > STOP_DIST then h:MoveTo(oh.Position) end
                 punchTimer = punchTimer + dt
                 if dist <= PUNCH_RANGE and punchTimer >= PUNCH_RATE then
@@ -284,6 +294,23 @@ RunService.Heartbeat:Connect(function(dt)
             end
         end
     end
+
+    -- Debug label update (single loop, no duplicate Heartbeat)
+    local nearest2, dist2 = nearestPlayer()
+    local distStr = dist2 == math.huge and "--" or string.format("%.1f", dist2)
+    local zoneStr = dist2 <= STOP_DIST and "STOP"
+                 or dist2 <= NEAR_DIST  and "CLOSE"
+                 or "FAR"
+    local count = 0
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character and getHRP(p.Character) then
+            count = count + 1
+        end
+    end
+    debugLabel.Text = string.format(
+        "dist: %s (%s)\nbomb: %s\nplayers: %d",
+        distStr, zoneStr, holding and "YES" or "no", count
+    )
 end)
 
 LocalPlayer.CharacterAdded:Connect(function()
@@ -311,48 +338,3 @@ Window:Toggle("Free Fly",        false, function(state)
     if not state and cfg.NoFall then setupNoFall(true) end
 end)
 Window:Toggle("Auto Punch",      false, function(state) cfg.AutoPunch = state; punchTimer = 0 end)
-
--- Debug overlay: live distance + nearby player count
-local debugGui   = Instance.new("ScreenGui")
-debugGui.Name    = "POEDebug"
-debugGui.ResetOnSpawn = false
-debugGui.Parent  = LocalPlayer.PlayerGui
-
-local debugLabel = Instance.new("TextLabel")
-debugLabel.Size                  = UDim2.new(0, 180, 0, 70)
-debugLabel.Position              = UDim2.new(0, 8, 0.45, 0)
-debugLabel.BackgroundColor3      = Color3.fromRGB(0, 0, 0)
-debugLabel.BackgroundTransparency = 0.45
-debugLabel.TextColor3            = Color3.fromRGB(100, 255, 100)
-debugLabel.TextSize              = 13
-debugLabel.Font                  = Enum.Font.Code
-debugLabel.TextXAlignment        = Enum.TextXAlignment.Left
-debugLabel.TextYAlignment        = Enum.TextYAlignment.Top
-debugLabel.Text                  = "debug: off"
-debugLabel.BorderSizePixel       = 0
-debugLabel.Parent                = debugGui
-
-RunService.Heartbeat:Connect(function()
-    local c2 = getChar(); if not c2 then return end
-    local r2 = getHRP(c2); if not r2 then return end
-    local nearest, dist = nearestPlayer()
-    local distStr = dist == math.huge and "--" or string.format("%.1f", dist)
-    local zoneStr = dist <= STOP_DIST and "STOP"
-                 or dist <= NEAR_DIST  and "CLOSE"
-                 or "FAR"
-    -- count all visible players
-    local count = 0
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p.Character then
-            local oh = getHRP(p.Character)
-            if oh then count = count + 1 end
-        end
-    end
-    local bombStr = hasBomb(c2) and "YES" or "no"
-    debugLabel.Text = string.format(
-        "dist: %s (%s)
-bomb: %s
-players: %d",
-        distStr, zoneStr, bombStr, count
-    )
-end)
