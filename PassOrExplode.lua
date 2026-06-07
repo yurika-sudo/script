@@ -45,6 +45,9 @@ local noFallBV       = nil
 local freeFlyBV      = nil
 local ghostActive    = false
 
+-- UI toggle references — needed so CharacterAdded can sync toggle state
+local toggleAutoPunch = nil
+
 local RS            = game:GetService("ReplicatedStorage")
 local remoteAction  = nil
 local remoteEndgame = nil
@@ -313,9 +316,22 @@ RunService.Heartbeat:Connect(function(dt)
     )
 end)
 
+-- CharacterAdded: reset physics objects + auto-disable AutoPunch
+-- AutoPunch uses VIM mouse events — if it fires during lobby teleport it
+-- lands on the virtual joystick area and locks input until toggled off
 LocalPlayer.CharacterAdded:Connect(function()
     noFallBV = nil; freeFlyBV = nil; ghostActive = false
-    noclipTimer = 0; teleportTimer = 0
+    noclipTimer = 0; teleportTimer = 0; punchTimer = 0
+
+    -- Disable AutoPunch on respawn/teleport to lobby so VIM clicks
+    -- don't overlap the joystick and break movement controls
+    if cfg.AutoPunch then
+        cfg.AutoPunch = false
+        if toggleAutoPunch then
+            pcall(function() toggleAutoPunch:Set(false) end)
+        end
+    end
+
     task.wait(1)
     if cfg.FreeFly then setupFreeFly(true) end
     if cfg.NoFall  then setupNoFall(true)  end
@@ -337,4 +353,8 @@ Window:Toggle("Free Fly",        false, function(state)
     setupFreeFly(state)
     if not state and cfg.NoFall then setupNoFall(true) end
 end)
-Window:Toggle("Auto Punch",      false, function(state) cfg.AutoPunch = state; punchTimer = 0 end)
+-- Store reference so CharacterAdded can sync the toggle UI state
+toggleAutoPunch = Window:Toggle("Auto Punch", false, function(state)
+    cfg.AutoPunch = state
+    punchTimer = 0
+end)
