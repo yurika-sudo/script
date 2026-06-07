@@ -18,19 +18,17 @@ local cfg = {
     AutoPunch    = false,
 }
 
-local FLY_HEIGHT   = 14
-local PUNCH_RANGE  = 6
-local PUNCH_RATE   = 0.45
+local STOP_DIST   = 4     -- studs: stop MoveTo when this close to target
+local FLY_HEIGHT  = 14
+local PUNCH_RANGE = 6
+local PUNCH_RATE  = 0.45
 
-local moveTimer      = 0
-local bombHoldTimer  = 0
-local bombChaseDelay = 0
-local punchTimer     = 0
-local flyBP          = nil
-local noFallBV       = nil
-local ghostActive    = false
+local moveTimer  = 0
+local punchTimer = 0
+local flyBP      = nil
+local noFallBV   = nil
+local ghostActive = false
 
--- Remotes: background fetch so UI renders instantly
 local RS            = game:GetService("ReplicatedStorage")
 local remoteAction  = nil
 local remoteEndgame = nil
@@ -71,7 +69,6 @@ local function nearestPlayer()
     return best, bestDist
 end
 
--- Noclip: upper body only so step-up/stairs still work
 local LEG_NAMES = {
     "LeftFoot","RightFoot","LeftLowerLeg","RightLowerLeg",
     "LeftUpperLeg","RightUpperLeg","Left Leg","Right Leg"
@@ -89,9 +86,6 @@ local function setNoclip(c, on)
     ghostActive = on
 end
 
--- No Fall: BodyVelocity conditional
--- vel.Y < 0 (falling)  → MaxForce active, velocity locked to 0
--- vel.Y >= 0 (jumping) → MaxForce = 0, normal physics
 local function setupNoFall(enable)
     if noFallBV then pcall(function() noFallBV:Destroy() end); noFallBV = nil end
     if enable then
@@ -102,12 +96,11 @@ local function setupNoFall(enable)
             bv.Velocity = Vector3.new(0, 0, 0)
             bv.MaxForce = Vector3.new(0, 0, 0)
             bv.Parent   = r
-            noFallBV = bv
+            noFallBV    = bv
         end
     end
 end
 
--- Fly: BodyPosition with damping (no oscillation)
 local function setupFly(enable)
     if flyBP then pcall(function() flyBP:Destroy() end); flyBP = nil end
     if enable then
@@ -136,7 +129,6 @@ local function updateFly()
     flyBP.Position = Vector3.new(r.Position.X, groundY + FLY_HEIGHT, r.Position.Z)
 end
 
--- Punch: remotes + VirtualInputManager tap (mobile)
 local VIM = game:GetService("VirtualInputManager")
 local function firePunch(targetChar, targetHRP)
     if remoteAction then
@@ -148,7 +140,6 @@ local function firePunch(targetChar, targetHRP)
         pcall(function() remoteEndgame:FireServer(targetChar) end)
         pcall(function() remoteEndgame:FireServer() end)
     end
-    -- Tap on target's screen position (works if punch is tap-based on mobile)
     pcall(function()
         local sp, vis = workspace.CurrentCamera:WorldToScreenPoint(targetHRP.Position)
         if vis then
@@ -158,74 +149,35 @@ local function firePunch(targetChar, targetHRP)
             end)
         end
     end)
-    -- Scan PlayerGui for punch button
-    pcall(function()
-        for _, v in ipairs(LocalPlayer.PlayerGui:GetDescendants()) do
-            if (v:IsA("ImageButton") or v:IsA("TextButton")) and v.Visible then
-                local n = v.Name:lower()
-                if n:find("punch") or n:find("attack") or n:find("fight") then
-                    v.MouseButton1Click:Fire()
-                end
-            end
-        end
-    end)
 end
 
--- Main loop
 RunService.Heartbeat:Connect(function(dt)
     local c = getChar(); local h = getHum(c)
     if not h or h.Health <= 0 then return end
     local r = getHRP(c)
 
-    -- Persistent speed
     local spd = cfg.SpeedEnabled and cfg.Speed or 16
     if h.WalkSpeed ~= spd then h.WalkSpeed = spd end
 
-    -- Noclip (independent of bomb)
-    if cfg.Noclip and not ghostActive then
-        setNoclip(c, true)
-    elseif not cfg.Noclip and ghostActive then
-        setNoclip(c, false)
-    end
+    if cfg.Noclip and not ghostActive then setNoclip(c, true)
+    elseif not cfg.Noclip and ghostActive then setNoclip(c, false) end
 
-    -- Auto Pass Bomb with smart delay
-    if cfg.AutoPassBomb then
-        local holding = hasBomb(c)
-        if holding then
-            bombHoldTimer = bombHoldTimer + dt
-
-            -- Randomize chase delay once when bomb is received
-            if bombChaseDelay == 0 then
-                bombChaseDelay = math.random(7, 10)
-            end
-
-            -- Suppress fly while chasing so character can descend
-            if flyBP then flyBP.MaxForce = Vector3.new(0, 0, 0) end
-
-            -- Chase when: delay passed OR target already very close
-            local target, dist = nearestPlayer()
-            local closeEnough  = dist <= spd * 1.5
-            if bombHoldTimer >= bombChaseDelay or closeEnough then
-                moveTimer = moveTimer + dt
-                if moveTimer >= 0.15 and target and target.Character then
-                    moveTimer = 0
-                    local oh = getHRP(target.Character)
-                    if oh then h:MoveTo(oh.Position) end
-                end
-            end
-        else
-            if bombHoldTimer > 0 then
-                bombHoldTimer  = 0
-                bombChaseDelay = 0
-                -- Restore fly force if fly mode is on
-                if cfg.Fly and flyBP then
-                    flyBP.MaxForce = Vector3.new(0, 1e5, 0)
-                end
+    -- Auto Pass Bomb: instant chase, stop when close enough to avoid stutter
+    if cfg.AutoPassBomb and hasBomb(c) then
+        if flyBP then flyBP.MaxForce = Vector3.new(0, 0, 0) end
+        local target, dist = nearestPlayer()
+        if target and target.Character and dist > STOP_DIST then
+            moveTimer = moveTimer + dt
+            if moveTimer >= 0.15 then
+                moveTimer = 0
+                local oh = getHRP(target.Character)
+                if oh then h:MoveTo(oh.Position) end
             end
         end
+    elseif cfg.Fly and flyBP and flyBP.MaxForce == Vector3.new(0,0,0) then
+        flyBP.MaxForce = Vector3.new(0, 1e5, 0)
     end
 
-    -- No Fall (skip when fly handles Y)
     if cfg.NoFall and noFallBV and r and not cfg.Fly then
         local vel = r.AssemblyLinearVelocity
         if vel.Y < 0 then
@@ -236,17 +188,15 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- Fly
     if cfg.Fly and not (cfg.AutoPassBomb and hasBomb(c)) then updateFly() end
 
-    -- Auto Punch (PVP only)
     if cfg.AutoPunch and cfg.PVPMode and r then
         local target, dist = nearestPlayer()
         if target and target.Character then
             local oh = getHRP(target.Character)
             if oh then
                 if r.Position.Y - oh.Position.Y > 12 then return end
-                h:MoveTo(oh.Position)
+                if dist > STOP_DIST then h:MoveTo(oh.Position) end
                 punchTimer = punchTimer + dt
                 if dist <= PUNCH_RANGE and punchTimer >= PUNCH_RATE then
                     punchTimer = 0
@@ -259,19 +209,15 @@ end)
 
 LocalPlayer.CharacterAdded:Connect(function()
     flyBP = nil; noFallBV = nil; ghostActive = false
-    bombHoldTimer = 0; bombChaseDelay = 0
     task.wait(1)
     if cfg.Fly    then setupFly(true) end
     if cfg.NoFall then setupNoFall(true) end
 end)
 
--- UI ----------------------------------------------------------
-
-Window:Label("Bomb Game")
-
+-- UI: no labels, just toggles and buttons
 Window:Toggle("Auto Pass Bomb", false, function(state)
     cfg.AutoPassBomb = state
-    bombHoldTimer = 0; bombChaseDelay = 0; moveTimer = 0
+    moveTimer = 0
 end)
 
 Window:Toggle("Ghost Mode", false, function(state)
@@ -286,15 +232,12 @@ Window:Toggle("Speed Boost", false, function(state)
     cfg.SpeedEnabled = state
 end)
 
-Window:Button("Speed  16  (default)", function() cfg.Speed = 16 end)
-Window:Button("Speed  20  (subtle)",  function() cfg.Speed = 20 end)
-Window:Button("Speed  22  (safe max)",function() cfg.Speed = 22 end)
-
-Window:Label("PVP")
+Window:Button("Speed  16", function() cfg.Speed = 16 end)
+Window:Button("Speed  20", function() cfg.Speed = 20 end)
+Window:Button("Speed  22", function() cfg.Speed = 22 end)
 
 Window:Toggle("PVP Mode", false, function(state)
-    cfg.PVPMode = state
-    punchTimer  = 0
+    cfg.PVPMode = state; punchTimer = 0
 end)
 
 Window:Toggle("No Fall", false, function(state)
@@ -305,16 +248,9 @@ end)
 Window:Toggle("Fly", false, function(state)
     cfg.Fly = state
     setupFly(state)
-    if state then
-        -- Pause NoFall while flying (BodyPosition handles Y)
-        if noFallBV then noFallBV.MaxForce = Vector3.new(0,0,0) end
-    else
-        -- Re-enable NoFall when fly is turned off
-        if cfg.NoFall then setupNoFall(true) end
-    end
+    if not state and cfg.NoFall then setupNoFall(true) end
 end)
 
 Window:Toggle("Auto Punch", false, function(state)
-    cfg.AutoPunch = state
-    punchTimer    = 0
+    cfg.AutoPunch = state; punchTimer = 0
 end)
