@@ -8,25 +8,26 @@ local Library = loadstring(game:HttpGet(
 local Window = Library:Window("POE Assist")
 
 local cfg = {
-    AutoPassBomb = false,
-    Noclip       = false,
-    SpeedEnabled = false,
-    Speed        = 20,
-    NoFall       = false,
-    Fly          = false,
-    PVPMode      = false,
-    AutoPunch    = false,
+    AutoPassBomb  = false,
+    BombTeleport  = false,  -- instant CFrame to target when holding bomb
+    Noclip        = false,
+    SpeedEnabled  = false,
+    Speed         = 20,
+    NoFall        = false,
+    FreeFly       = false,
+    AutoPunch     = false,
 }
 
-local STOP_DIST   = 4     -- studs: stop MoveTo when this close to target
-local FLY_HEIGHT  = 14
+local STOP_DIST  = 4    -- studs: stop chasing when this close
+local NEAR_DIST  = 10   -- studs: switch from MoveTo to direct velocity
 local PUNCH_RANGE = 6
 local PUNCH_RATE  = 0.45
+local FLY_SPEED   = 40
 
 local moveTimer  = 0
 local punchTimer = 0
-local flyBP      = nil
 local noFallBV   = nil
+local freeFlyBV  = nil
 local ghostActive = false
 
 local RS            = game:GetService("ReplicatedStorage")
@@ -69,6 +70,7 @@ local function nearestPlayer()
     return best, bestDist
 end
 
+-- Noclip: upper body only, re-applied every frame so teleports don't break it
 local LEG_NAMES = {
     "LeftFoot","RightFoot","LeftLowerLeg","RightLowerLeg",
     "LeftUpperLeg","RightUpperLeg","Left Leg","Right Leg"
@@ -77,15 +79,17 @@ local function isLeg(name)
     for _, n in ipairs(LEG_NAMES) do if name == n then return true end end
     return false
 end
-local function setNoclip(c, on)
+local function applyNoclip(c, on)
     for _, p in ipairs(c:GetDescendants()) do
         if p:IsA("BasePart") and not isLeg(p.Name) then
-            p.CanCollide = not on
+            if on  and p.CanCollide then p.CanCollide = false end
+            if not on and not p.CanCollide then p.CanCollide = true end
         end
     end
     ghostActive = on
 end
 
+-- No Fall: BodyVelocity conditional
 local function setupNoFall(enable)
     if noFallBV then pcall(function() noFallBV:Destroy() end); noFallBV = nil end
     if enable then
@@ -101,32 +105,20 @@ local function setupNoFall(enable)
     end
 end
 
-local function setupFly(enable)
-    if flyBP then pcall(function() flyBP:Destroy() end); flyBP = nil end
+-- Free Fly: BodyVelocity, joystick = horizontal, camera pitch = vertical
+local function setupFreeFly(enable)
+    if freeFlyBV then pcall(function() freeFlyBV:Destroy() end); freeFlyBV = nil end
     if enable then
         local r = getHRP(getChar())
         if r then
-            local bp    = Instance.new("BodyPosition")
-            bp.Name     = "FlyBP"
-            bp.MaxForce = Vector3.new(0, 1e5, 0)
-            bp.P        = 8000
-            bp.D        = 600
-            bp.Position = r.Position
-            bp.Parent   = r
-            flyBP = bp
+            local bv    = Instance.new("BodyVelocity")
+            bv.Name     = "FreeFlyBV"
+            bv.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+            bv.Velocity = Vector3.new(0, 0, 0)
+            bv.Parent   = r
+            freeFlyBV   = bv
         end
     end
-end
-
-local function updateFly()
-    local c = getChar(); local r = getHRP(c)
-    if not r or not flyBP then return end
-    local params = RaycastParams.new()
-    params.FilterDescendantsInstances = {c}
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    local ray     = workspace:Raycast(r.Position, Vector3.new(0,-150,0), params)
-    local groundY = ray and ray.Position.Y or (r.Position.Y - FLY_HEIGHT)
-    flyBP.Position = Vector3.new(r.Position.X, groundY + FLY_HEIGHT, r.Position.Z)
 end
 
 local VIM = game:GetService("VirtualInputManager")
@@ -156,29 +148,60 @@ RunService.Heartbeat:Connect(function(dt)
     if not h or h.Health <= 0 then return end
     local r = getHRP(c)
 
-    local spd = cfg.SpeedEnabled and cfg.Speed or 16
+    -- Speed
+    local spd = (cfg.SpeedEnabled and not cfg.FreeFly) and cfg.Speed or 16
     if h.WalkSpeed ~= spd then h.WalkSpeed = spd end
 
-    if cfg.Noclip and not ghostActive then setNoclip(c, true)
-    elseif not cfg.Noclip and ghostActive then setNoclip(c, false) end
-
-    -- Auto Pass Bomb: instant chase, stop when close enough to avoid stutter
-    if cfg.AutoPassBomb and hasBomb(c) then
-        if flyBP then flyBP.MaxForce = Vector3.new(0, 0, 0) end
-        local target, dist = nearestPlayer()
-        if target and target.Character and dist > STOP_DIST then
-            moveTimer = moveTimer + dt
-            if moveTimer >= 0.15 then
-                moveTimer = 0
-                local oh = getHRP(target.Character)
-                if oh then h:MoveTo(oh.Position) end
-            end
-        end
-    elseif cfg.Fly and flyBP and flyBP.MaxForce == Vector3.new(0,0,0) then
-        flyBP.MaxForce = Vector3.new(0, 1e5, 0)
+    -- Ghost: re-apply every frame so teleports don't reset it
+    if cfg.Noclip then
+        applyNoclip(c, true)
+    elseif ghostActive then
+        applyNoclip(c, false)
     end
 
-    if cfg.NoFall and noFallBV and r and not cfg.Fly then
+    -- Bomb Teleport: instant CFrame to target the moment we hold bomb
+    if cfg.BombTeleport and hasBomb(c) then
+        local target, _ = nearestPlayer()
+        if target and target.Character then
+            local oh = getHRP(target.Character)
+            if oh then
+                -- Teleport next to target (offset slightly so not inside them)
+                local dir = (r.Position - oh.Position)
+                local offset = dir.Magnitude > 0 and dir.Unit * 3 or Vector3.new(3,0,0)
+                r.CFrame = CFrame.new(oh.Position + offset)
+            end
+        end
+    end
+
+    -- Auto Pass Bomb: walk + last-mile direct velocity
+    if cfg.AutoPassBomb and not cfg.BombTeleport and hasBomb(c) then
+        local target, dist = nearestPlayer()
+        if target and target.Character then
+            local oh = getHRP(target.Character)
+            if oh and dist > STOP_DIST then
+                if dist > NEAR_DIST then
+                    -- Normal MoveTo when far
+                    moveTimer = moveTimer + dt
+                    if moveTimer >= 0.15 then
+                        moveTimer = 0
+                        h:MoveTo(oh.Position)
+                    end
+                else
+                    -- Direct velocity push for last ~10 studs (no stutter)
+                    local dir = (oh.Position - r.Position)
+                    dir = Vector3.new(dir.X, 0, dir.Z).Unit
+                    r.AssemblyLinearVelocity = Vector3.new(
+                        dir.X * spd,
+                        r.AssemblyLinearVelocity.Y,
+                        dir.Z * spd
+                    )
+                end
+            end
+        end
+    end
+
+    -- No Fall
+    if cfg.NoFall and noFallBV and r and not cfg.FreeFly then
         local vel = r.AssemblyLinearVelocity
         if vel.Y < 0 then
             noFallBV.MaxForce = Vector3.new(0, 1e6, 0)
@@ -188,9 +211,25 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    if cfg.Fly and not (cfg.AutoPassBomb and hasBomb(c)) then updateFly() end
+    -- Free Fly: joystick horizontal + camera pitch vertical
+    if cfg.FreeFly and freeFlyBV and r then
+        local cam     = workspace.CurrentCamera
+        local moveDir = h.MoveDirection  -- world-space, camera-relative from joystick
+        local pitchY  = cam.CFrame.LookVector.Y  -- -1 (down) to 1 (up)
 
-    if cfg.AutoPunch and cfg.PVPMode and r then
+        if moveDir.Magnitude > 0 then
+            freeFlyBV.Velocity = Vector3.new(
+                moveDir.X * FLY_SPEED,
+                pitchY   * FLY_SPEED,  -- tilt camera = fly up/down
+                moveDir.Z * FLY_SPEED
+            )
+        else
+            freeFlyBV.Velocity = Vector3.new(0, 0, 0)  -- hover when idle
+        end
+    end
+
+    -- Auto Punch (no PVP Mode gate)
+    if cfg.AutoPunch and r then
         local target, dist = nearestPlayer()
         if target and target.Character then
             local oh = getHRP(target.Character)
@@ -208,23 +247,26 @@ RunService.Heartbeat:Connect(function(dt)
 end)
 
 LocalPlayer.CharacterAdded:Connect(function()
-    flyBP = nil; noFallBV = nil; ghostActive = false
+    noFallBV = nil; freeFlyBV = nil; ghostActive = false
     task.wait(1)
-    if cfg.Fly    then setupFly(true) end
-    if cfg.NoFall then setupNoFall(true) end
+    if cfg.FreeFly then setupFreeFly(true) end
+    if cfg.NoFall  then setupNoFall(true) end
 end)
 
--- UI: no labels, just toggles and buttons
+-- UI: no labels, compact
 Window:Toggle("Auto Pass Bomb", false, function(state)
-    cfg.AutoPassBomb = state
-    moveTimer = 0
+    cfg.AutoPassBomb = state; moveTimer = 0
+end)
+
+Window:Toggle("Bomb Teleport", false, function(state)
+    cfg.BombTeleport = state
 end)
 
 Window:Toggle("Ghost Mode", false, function(state)
     cfg.Noclip = state
     if not state and ghostActive then
         local c = getChar()
-        if c then setNoclip(c, false) end
+        if c then applyNoclip(c, false) end
     end
 end)
 
@@ -236,18 +278,15 @@ Window:Button("Speed  16", function() cfg.Speed = 16 end)
 Window:Button("Speed  20", function() cfg.Speed = 20 end)
 Window:Button("Speed  22", function() cfg.Speed = 22 end)
 
-Window:Toggle("PVP Mode", false, function(state)
-    cfg.PVPMode = state; punchTimer = 0
-end)
-
 Window:Toggle("No Fall", false, function(state)
     cfg.NoFall = state
     setupNoFall(state)
 end)
 
-Window:Toggle("Fly", false, function(state)
-    cfg.Fly = state
-    setupFly(state)
+Window:Toggle("Free Fly", false, function(state)
+    cfg.FreeFly = state
+    setupFreeFly(state)
+    -- Re-enable NoFall after fly is off
     if not state and cfg.NoFall then setupNoFall(true) end
 end)
 
