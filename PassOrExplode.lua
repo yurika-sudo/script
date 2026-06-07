@@ -16,6 +16,7 @@ local cfg = {
     Fly          = false,
     PVPMode      = false,
     AutoPunch    = false,
+    LockUI       = false,
 }
 
 local FLY_HEIGHT   = 14
@@ -29,6 +30,12 @@ local punchTimer     = 0
 local flyBP          = nil
 local noFallBV       = nil
 local ghostActive    = false
+
+-- UI state
+local uiClampTimer  = 0
+local ourScreenGui  = nil
+local windowFrame   = nil
+local lockedPos     = nil
 
 -- Remotes: background fetch so UI renders instantly
 local RS            = game:GetService("ReplicatedStorage")
@@ -90,8 +97,6 @@ local function setNoclip(c, on)
 end
 
 -- No Fall: BodyVelocity conditional
--- vel.Y < 0 (falling)  → MaxForce active, velocity locked to 0
--- vel.Y >= 0 (jumping) → MaxForce = 0, normal physics
 local function setupNoFall(enable)
     if noFallBV then pcall(function() noFallBV:Destroy() end); noFallBV = nil end
     if enable then
@@ -107,7 +112,7 @@ local function setupNoFall(enable)
     end
 end
 
--- Fly: BodyPosition with damping (no oscillation)
+-- Fly: BodyPosition with damping
 local function setupFly(enable)
     if flyBP then pcall(function() flyBP:Destroy() end); flyBP = nil end
     if enable then
@@ -148,7 +153,6 @@ local function firePunch(targetChar, targetHRP)
         pcall(function() remoteEndgame:FireServer(targetChar) end)
         pcall(function() remoteEndgame:FireServer() end)
     end
-    -- Tap on target's screen position (works if punch is tap-based on mobile)
     pcall(function()
         local sp, vis = workspace.CurrentCamera:WorldToScreenPoint(targetHRP.Position)
         if vis then
@@ -158,7 +162,6 @@ local function firePunch(targetChar, targetHRP)
             end)
         end
     end)
-    -- Scan PlayerGui for punch button
     pcall(function()
         for _, v in ipairs(LocalPlayer.PlayerGui:GetDescendants()) do
             if (v:IsA("ImageButton") or v:IsA("TextButton")) and v.Visible then
@@ -171,7 +174,90 @@ local function firePunch(targetChar, targetHRP)
     end)
 end
 
+-- ============================================================
+-- UI position helpers
+-- ============================================================
+local function clampWindowToScreen()
+    if not windowFrame then return end
+    pcall(function()
+        local vp     = workspace.CurrentCamera.ViewportSize
+        local absPos = windowFrame.AbsolutePosition
+        local absSz  = windowFrame.AbsoluteSize
+        -- Keep at least 40px from top so title bar stays visible
+        local nx = math.clamp(absPos.X, 0,  vp.X - absSz.X)
+        local ny = math.clamp(absPos.Y, 40, vp.Y - absSz.Y)
+        if math.abs(absPos.X - nx) > 1 or math.abs(absPos.Y - ny) > 1 then
+            windowFrame.Position = UDim2.new(0, nx, 0, ny)
+        end
+    end)
+end
+
+local function resetWindowPosition()
+    if not windowFrame then return end
+    pcall(function()
+        windowFrame.Position = UDim2.new(0, 16, 0, 80)
+        lockedPos = windowFrame.Position
+    end)
+end
+
+-- Find TurtleLib's ScreenGui after it renders
+task.spawn(function()
+    task.wait(0.4)
+    local pg = LocalPlayer.PlayerGui
+    for _, gui in ipairs(pg:GetChildren()) do
+        if gui:IsA("ScreenGui") then
+            for _, desc in ipairs(gui:GetDescendants()) do
+                if (desc:IsA("TextLabel") or desc:IsA("TextButton"))
+                    and tostring(desc.Text):find("POE") then
+                    ourScreenGui = gui
+                    break
+                end
+            end
+            if ourScreenGui then break end
+        end
+    end
+
+    -- Fallback: just grab every ScreenGui and boost order
+    -- (safe because DisplayOrder only affects stacking vs other ScreenGuis)
+    if not ourScreenGui then
+        for _, gui in ipairs(pg:GetChildren()) do
+            if gui:IsA("ScreenGui") then
+                pcall(function()
+                    -- only boost if it has at least one Frame child (looks like a lib window)
+                    for _, ch in ipairs(gui:GetChildren()) do
+                        if ch:IsA("Frame") then ourScreenGui = gui; break end
+                    end
+                end)
+                if ourScreenGui then break end
+            end
+        end
+    end
+
+    if ourScreenGui then
+        -- Stay above game banners / overlays
+        pcall(function() ourScreenGui.DisplayOrder = 999 end)
+        pcall(function() ourScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling end)
+
+        -- Find the top-level draggable Frame
+        for _, ch in ipairs(ourScreenGui:GetChildren()) do
+            if ch:IsA("Frame") then
+                windowFrame = ch
+                break
+            end
+        end
+
+        -- Snap to a safe starting position
+        if windowFrame then
+            pcall(function()
+                windowFrame.Position = UDim2.new(0, 16, 0, 80)
+            end)
+        end
+    end
+end)
+
+-- ============================================================
 -- Main loop
+-- ============================================================
 RunService.Heartbeat:Connect(function(dt)
     local c = getChar(); local h = getHum(c)
     if not h or h.Health <= 0 then return end
@@ -181,28 +267,27 @@ RunService.Heartbeat:Connect(function(dt)
     local spd = cfg.SpeedEnabled and cfg.Speed or 16
     if h.WalkSpeed ~= spd then h.WalkSpeed = spd end
 
-    -- Noclip (independent of bomb)
+    -- Noclip
     if cfg.Noclip and not ghostActive then
         setNoclip(c, true)
     elseif not cfg.Noclip and ghostActive then
         setNoclip(c, false)
     end
 
-    -- Auto Pass Bomb with smart delay
+    -- Auto Pass Bomb — anti-sus delay adjusted for 10–14s game timer
+    -- Waits 2–4s first (looks natural), still leaves ~6–12s to pass it
     if cfg.AutoPassBomb then
         local holding = hasBomb(c)
         if holding then
             bombHoldTimer = bombHoldTimer + dt
 
-            -- Randomize chase delay once when bomb is received
             if bombChaseDelay == 0 then
-                bombChaseDelay = math.random(7, 10)
+                -- FIX: was math.random(7,10) — too long for a 10-14s timer
+                bombChaseDelay = math.random(2, 4)
             end
 
-            -- Suppress fly while chasing so character can descend
             if flyBP then flyBP.MaxForce = Vector3.new(0, 0, 0) end
 
-            -- Chase when: delay passed OR target already very close
             local target, dist = nearestPlayer()
             local closeEnough  = dist <= spd * 1.5
             if bombHoldTimer >= bombChaseDelay or closeEnough then
@@ -217,7 +302,6 @@ RunService.Heartbeat:Connect(function(dt)
             if bombHoldTimer > 0 then
                 bombHoldTimer  = 0
                 bombChaseDelay = 0
-                -- Restore fly force if fly mode is on
                 if cfg.Fly and flyBP then
                     flyBP.MaxForce = Vector3.new(0, 1e5, 0)
                 end
@@ -225,7 +309,7 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- No Fall (skip when fly handles Y)
+    -- No Fall
     if cfg.NoFall and noFallBV and r and not cfg.Fly then
         local vel = r.AssemblyLinearVelocity
         if vel.Y < 0 then
@@ -239,7 +323,7 @@ RunService.Heartbeat:Connect(function(dt)
     -- Fly
     if cfg.Fly and not (cfg.AutoPassBomb and hasBomb(c)) then updateFly() end
 
-    -- Auto Punch (PVP only)
+    -- Auto Punch
     if cfg.AutoPunch and cfg.PVPMode and r then
         local target, dist = nearestPlayer()
         if target and target.Character then
@@ -255,6 +339,18 @@ RunService.Heartbeat:Connect(function(dt)
             end
         end
     end
+
+    -- UI: clamp every 0.6s so window stays on screen
+    uiClampTimer = uiClampTimer + dt
+    if uiClampTimer >= 0.6 then
+        uiClampTimer = 0
+        if cfg.LockUI and lockedPos and windowFrame then
+            -- Hard-lock: snap back to saved position every tick
+            pcall(function() windowFrame.Position = lockedPos end)
+        else
+            clampWindowToScreen()
+        end
+    end
 end)
 
 LocalPlayer.CharacterAdded:Connect(function()
@@ -265,7 +361,9 @@ LocalPlayer.CharacterAdded:Connect(function()
     if cfg.NoFall then setupNoFall(true) end
 end)
 
--- UI ----------------------------------------------------------
+-- ============================================================
+-- UI
+-- ============================================================
 
 Window:Label("Bomb Game")
 
@@ -306,10 +404,8 @@ Window:Toggle("Fly", false, function(state)
     cfg.Fly = state
     setupFly(state)
     if state then
-        -- Pause NoFall while flying (BodyPosition handles Y)
         if noFallBV then noFallBV.MaxForce = Vector3.new(0,0,0) end
     else
-        -- Re-enable NoFall when fly is turned off
         if cfg.NoFall then setupNoFall(true) end
     end
 end)
@@ -317,4 +413,19 @@ end)
 Window:Toggle("Auto Punch", false, function(state)
     cfg.AutoPunch = state
     punchTimer    = 0
+end)
+
+Window:Label("UI")
+
+Window:Button("Reset UI Position", function()
+    resetWindowPosition()
+end)
+
+Window:Toggle("Lock UI Position", false, function(state)
+    cfg.LockUI = state
+    if state and windowFrame then
+        -- Clamp dulu sebelum lock biar posisinya aman
+        clampWindowToScreen()
+        pcall(function() lockedPos = windowFrame.Position end)
+    end
 end)
