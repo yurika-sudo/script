@@ -29,10 +29,14 @@ local flyBP       = nil   -- BodyPosition for fly
 local noFallForce = nil   -- BodyForce for true no-fall
 local ghostActive = false -- noclip state tracking
 
--- Hardcoded remotes (scanned: 26 total)
+-- Remotes fetched in background so UI renders immediately (not blocking)
 local RS            = game:GetService("ReplicatedStorage")
-local remoteAction  = RS:WaitForChild("ActionEvent", 10)
-local remoteEndgame = RS:WaitForChild("EndgameAttackEvent", 10)
+local remoteAction  = nil
+local remoteEndgame = nil
+task.spawn(function()
+    remoteAction  = RS:WaitForChild("ActionEvent", 15)
+    remoteEndgame = RS:WaitForChild("EndgameAttackEvent", 15)
+end)
 
 local function getChar() return LocalPlayer.Character end
 local function getHum(c) return c and c:FindFirstChildOfClass("Humanoid") end
@@ -122,9 +126,23 @@ end
 
 -- [BUG 1 FIX] Noclip: set all parts CanCollide = false when holding bomb
 -- Restored when bomb is passed / auto pass disabled
+-- Only noclip upper body — legs keep CanCollide=true so step-up still works
+local LEG_PARTS = {
+    "LeftFoot", "RightFoot",
+    "LeftLowerLeg", "RightLowerLeg",
+    "LeftUpperLeg", "RightUpperLeg",
+    "Left Leg", "Right Leg",  -- R6 names
+}
+local function isLegPart(name)
+    for _, n in ipairs(LEG_PARTS) do
+        if name == n then return true end
+    end
+    return false
+end
+
 local function setNoclip(c, enable)
     for _, part in ipairs(c:GetDescendants()) do
-        if part:IsA("BasePart") then
+        if part:IsA("BasePart") and not isLegPart(part.Name) then
             part.CanCollide = not enable
         end
     end
