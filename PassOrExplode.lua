@@ -167,15 +167,20 @@ local function firePunch(targetChar, targetHRP)
     end)
 end
 
--- Debug overlay: live distance + nearby player count
--- Defined before Heartbeat so debugLabel is never nil when the loop runs
-local debugGui   = Instance.new("ScreenGui")
-debugGui.Name    = "POEDebug"
+-- ── Debug overlay ────────────────────────────────────────────────────────────
+-- Defined before Heartbeat so labels are never nil when the loop runs.
+-- Layout:
+--   [debugLabel]  top-left  — live game stats (dist/bomb/players), always visible
+--   [scanPanel]   full-screen scrollable list — only visible after a scan
+-- ─────────────────────────────────────────────────────────────────────────────
+local debugGui = Instance.new("ScreenGui")
+debugGui.Name         = "POEDebug"
 debugGui.ResetOnSpawn = false
-debugGui.Parent  = LocalPlayer.PlayerGui
+debugGui.Parent       = LocalPlayer.PlayerGui
 
+-- Live stats label (always on)
 local debugLabel = Instance.new("TextLabel")
-debugLabel.Size                   = UDim2.new(0, 180, 0, 70)
+debugLabel.Size                   = UDim2.new(0, 190, 0, 70)
 debugLabel.Position               = UDim2.new(0, 8, 0.45, 0)
 debugLabel.BackgroundColor3       = Color3.fromRGB(0, 0, 0)
 debugLabel.BackgroundTransparency = 0.45
@@ -188,6 +193,84 @@ debugLabel.Text                   = "initializing..."
 debugLabel.BorderSizePixel        = 0
 debugLabel.Parent                 = debugGui
 
+-- Scan panel — scrollable overlay shown after Scan button pressed
+local scanFrame = Instance.new("Frame")
+scanFrame.Size              = UDim2.new(1, -16, 0.55, 0)
+scanFrame.Position          = UDim2.new(0, 8, 0, 8)
+scanFrame.BackgroundColor3  = Color3.fromRGB(10, 10, 10)
+scanFrame.BackgroundTransparency = 0.15
+scanFrame.BorderSizePixel   = 0
+scanFrame.Visible           = false
+scanFrame.Parent            = debugGui
+
+-- Close button inside scan panel
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size            = UDim2.new(0, 60, 0, 24)
+closeBtn.Position        = UDim2.new(1, -64, 0, 4)
+closeBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+closeBtn.TextColor3      = Color3.fromRGB(255, 255, 255)
+closeBtn.TextSize        = 13
+closeBtn.Font            = Enum.Font.GothamBold
+closeBtn.Text            = "CLOSE"
+closeBtn.BorderSizePixel = 0
+closeBtn.Parent          = scanFrame
+closeBtn.MouseButton1Click:Connect(function()
+    scanFrame.Visible = false
+end)
+
+-- Page label inside scan panel
+local pageLabel = Instance.new("TextLabel")
+pageLabel.Size              = UDim2.new(1, -70, 0, 24)
+pageLabel.Position          = UDim2.new(0, 4, 0, 4)
+pageLabel.BackgroundTransparency = 1
+pageLabel.TextColor3        = Color3.fromRGB(255, 220, 80)
+pageLabel.TextSize          = 12
+pageLabel.Font              = Enum.Font.GothamBold
+pageLabel.TextXAlignment    = Enum.TextXAlignment.Left
+pageLabel.Text              = "Scan Results"
+pageLabel.Parent            = scanFrame
+
+-- Scrollable content inside scan panel
+local scrollFrame = Instance.new("ScrollingFrame")
+scrollFrame.Size              = UDim2.new(1, 0, 1, -32)
+scrollFrame.Position          = UDim2.new(0, 0, 0, 30)
+scrollFrame.BackgroundTransparency = 1
+scrollFrame.BorderSizePixel   = 0
+scrollFrame.ScrollBarThickness = 6
+scrollFrame.CanvasSize        = UDim2.new(0, 0, 0, 0)
+scrollFrame.Parent            = scanFrame
+
+local listLayout = Instance.new("UIListLayout")
+listLayout.SortOrder  = Enum.SortOrder.LayoutOrder
+listLayout.Padding    = UDim.new(0, 2)
+listLayout.Parent     = scrollFrame
+
+-- Helper: add a line to the scan panel
+local function addScanLine(text, color)
+    local lbl = Instance.new("TextLabel")
+    lbl.Size                   = UDim2.new(1, -8, 0, 16)
+    lbl.BackgroundTransparency = 1
+    lbl.TextColor3             = color or Color3.fromRGB(200, 200, 200)
+    lbl.TextSize               = 11
+    lbl.Font                   = Enum.Font.Code
+    lbl.TextXAlignment         = Enum.TextXAlignment.Left
+    lbl.TextWrapped            = true
+    lbl.Text                   = text
+    lbl.Parent                 = scrollFrame
+    -- Expand canvas height to fit new line
+    scrollFrame.CanvasSize = UDim2.new(0, 0, 0,
+        listLayout.AbsoluteContentSize.Y + 8)
+    return lbl
+end
+
+local function clearScanPanel()
+    for _, v in ipairs(scrollFrame:GetChildren()) do
+        if v:IsA("TextLabel") then v:Destroy() end
+    end
+    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+end
+
+-- ── Main Heartbeat ────────────────────────────────────────────────────────────
 RunService.Heartbeat:Connect(function(dt)
     local c = getChar(); local h = getHum(c)
     if not h or h.Health <= 0 then return end
@@ -217,18 +300,32 @@ RunService.Heartbeat:Connect(function(dt)
 
     -- Bomb Teleport: appear in front of target, face them
     -- 0.25s cooldown to avoid physics spam
+    -- requireSameHeight=true: skip lobby/spectator players with large Y diff
+    -- Post-teleport safety: if we land outside arena (Y drops > 12 studs from
+    -- where we were), snap back to pre-teleport position immediately
     if cfg.BombTeleport and holding then
         teleportTimer = teleportTimer + dt
         if teleportTimer >= 0.25 then
             teleportTimer = 0
-            local target, _ = nearestPlayer()
+            local target, _ = nearestPlayer(true)  -- height-filtered
             if target and target.Character then
                 local oh = getHRP(target.Character)
                 if oh then
-                    -- Stand in front of where target is facing, look at them
-                    local facing = oh.CFrame.LookVector
-                    local newPos = oh.Position + Vector3.new(facing.X, 0, facing.Z) * 3
+                    local preY    = r.Position.Y
+                    local facing  = oh.CFrame.LookVector
+                    local newPos  = oh.Position + Vector3.new(facing.X, 0, facing.Z) * 3
+                    local preCF   = r.CFrame  -- save before teleport
+
                     r.CFrame = CFrame.new(newPos, oh.Position)
+
+                    -- Safety: if we ended up more than 12 studs below where we
+                    -- started (fell off arena edge), snap back instantly
+                    task.defer(function()
+                        local postR = getHRP(getChar())
+                        if postR and (preY - postR.Position.Y) > 12 then
+                            postR.CFrame = preCF
+                        end
+                    end)
                 end
             end
         end
@@ -269,7 +366,7 @@ RunService.Heartbeat:Connect(function(dt)
     local bombChasing = holding and (cfg.AutoPassBomb or cfg.BombTeleport)
     if cfg.FreeFly and freeFlyBV and r then
         if bombChasing then
-            freeFlyBV.MaxForce = Vector3.new(0, 0, 0)  -- suspend
+            freeFlyBV.MaxForce = Vector3.new(0, 0, 0)
         else
             freeFlyBV.MaxForce = Vector3.new(1e6, 1e6, 1e6)
             local cam     = workspace.CurrentCamera
@@ -304,7 +401,7 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- Debug label update (single loop, no duplicate Heartbeat)
+    -- Live stats label (always visible, small footprint)
     local nearest2, dist2 = nearestPlayer()
     local distStr = dist2 == math.huge and "--" or string.format("%.1f", dist2)
     local zoneStr = dist2 <= STOP_DIST and "STOP"
@@ -316,9 +413,12 @@ RunService.Heartbeat:Connect(function(dt)
             count = count + 1
         end
     end
+    local myR = getHRP(getChar())
+    local myY = myR and string.format("%.1f", myR.Position.Y) or "--"
+    debugLabel.Size = UDim2.new(0, 200, 0, 90)
     debugLabel.Text = string.format(
-        "dist: %s (%s)\nbomb: %s\nplayers: %d",
-        distStr, zoneStr, holding and "YES" or "no", count
+        "dist: %s (%s)\nbomb: %s\nplayers: %d\nY: %s",
+        distStr, zoneStr, holding and "YES" or "no", count, myY
     )
 end)
 
@@ -343,7 +443,7 @@ LocalPlayer.CharacterAdded:Connect(function()
     if cfg.NoFall  then setupNoFall(true)  end
 end)
 
--- UI
+-- ── UI ────────────────────────────────────────────────────────────────────────
 Window:Toggle("Auto Pass Bomb",  false, function(state) cfg.AutoPassBomb = state; moveTimer = 0 end)
 Window:Toggle("Bomb Teleport",   false, function(state) cfg.BombTeleport = state end)
 Window:Toggle("Ghost Mode",      false, function(state)
@@ -364,33 +464,87 @@ toggleAutoPunch = Window:Toggle("Auto Punch", false, function(state)
     cfg.AutoPunch = state
     punchTimer = 0
 end)
--- Debug: scan RS + workspace for NumberValue/IntValue/StringValue that might be the bomb timer
--- Press while holding the bomb, then check F9 console for a value counting down
-Window:Button("Scan Timer Values", function()
-    local found = {}
+
+-- ── Scan button ───────────────────────────────────────────────────────────────
+-- Scans RS + workspace and displays results in an on-screen scrollable panel.
+-- Run while holding the bomb to identify timer values.
+-- Also scans RemoteEvents/RemoteFunctions to help identify punch remotes.
+-- Results stay on screen until you tap CLOSE.
+Window:Button("Scan Values (on-screen)", function()
+    clearScanPanel()
+    scanFrame.Visible = true
+    pageLabel.Text = "Scanning..."
+
+    local timerHits   = {}  -- NumberValue/IntValue candidates
+    local remoteHits  = {}  -- RemoteEvent / RemoteFunction
+    local otherHits   = {}  -- StringValue / BoolValue / misc
 
     local function scanContainer(container, prefix)
         for _, v in ipairs(container:GetDescendants()) do
-            if v:IsA("NumberValue") or v:IsA("IntValue") or v:IsA("StringValue") then
+            local cn = v.ClassName
+            if cn == "NumberValue" or cn == "IntValue" then
                 local ok, val = pcall(function() return v.Value end)
                 if ok then
-                    table.insert(found, string.format("[%s] %s | %s = %s",
-                        v.ClassName, prefix, v:GetFullName(), tostring(val)))
+                    table.insert(timerHits, string.format(
+                        "[%s] %s = %s", cn, v:GetFullName(), tostring(val)))
                 end
+            elseif cn == "StringValue" then
+                local ok, val = pcall(function() return v.Value end)
+                if ok then
+                    table.insert(otherHits, string.format(
+                        "[StringValue] %s = \"%s\"", v:GetFullName(), tostring(val)))
+                end
+            elseif cn == "BoolValue" then
+                local ok, val = pcall(function() return v.Value end)
+                if ok then
+                    table.insert(otherHits, string.format(
+                        "[BoolValue] %s = %s", v:GetFullName(), tostring(val)))
+                end
+            elseif cn == "RemoteEvent" or cn == "RemoteFunction" then
+                table.insert(remoteHits, string.format(
+                    "[%s] %s", cn, v:GetFullName()))
             end
         end
     end
 
-    scanContainer(game:GetService("ReplicatedStorage"), "RS")
+    scanContainer(RS, "RS")
     scanContainer(workspace, "WS")
 
-    if #found == 0 then
-        print("[POE] No values found in RS or workspace")
+    -- Section: timer candidates
+    addScanLine("=== TIMER CANDIDATES (Number/Int) ===",
+        Color3.fromRGB(255, 220, 60))
+    if #timerHits == 0 then
+        addScanLine("  (none found)", Color3.fromRGB(160, 160, 160))
     else
-        print(string.format("[POE] Found %d values -- look for one counting down while holding bomb:", #found))
-        for _, line in ipairs(found) do
-            print(line)
+        for _, line in ipairs(timerHits) do
+            addScanLine("  " .. line, Color3.fromRGB(100, 255, 100))
         end
     end
-    print("[POE] Scan complete.")
+
+    -- Section: remotes (punch / endgame detection)
+    addScanLine("=== REMOTES (Event/Function) ===",
+        Color3.fromRGB(255, 220, 60))
+    if #remoteHits == 0 then
+        addScanLine("  (none found)", Color3.fromRGB(160, 160, 160))
+    else
+        for _, line in ipairs(remoteHits) do
+            addScanLine("  " .. line, Color3.fromRGB(120, 200, 255))
+        end
+    end
+
+    -- Section: other values (strings/bools — game state flags)
+    addScanLine("=== OTHER VALUES (String/Bool) ===",
+        Color3.fromRGB(255, 220, 60))
+    if #otherHits == 0 then
+        addScanLine("  (none found)", Color3.fromRGB(160, 160, 160))
+    else
+        for _, line in ipairs(otherHits) do
+            addScanLine("  " .. line, Color3.fromRGB(200, 180, 255))
+        end
+    end
+
+    local total = #timerHits + #remoteHits + #otherHits
+    pageLabel.Text = string.format(
+        "Scan done: %d timer | %d remotes | %d other",
+        #timerHits, #remoteHits, #otherHits)
 end)
