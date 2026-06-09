@@ -18,7 +18,6 @@ local cfg = {
     NoFall       = false,
     FreeFly      = false,
     AutoPunch    = false,
-    GodMode      = false,
 }
 
 -- ── Tunable constants ─────────────────────────────────────────────────────────
@@ -28,7 +27,8 @@ local SPEED_DEFAULT = 16
 
 local MAX_TARGET_DIST  = 200
 local MAX_Y_DIFF       = 15   -- general arena filter
-local PUNCH_Y_DIFF     = 8    -- tighter filter for Auto Punch only
+local PUNCH_Y_DIFF     = 8    -- tighter Y filter for Auto Punch
+local PUNCH_DIST_MAX   = 15   -- Auto Punch only targets within this range (filters spectators)
 local LOBBY_Y_THRESH   = 10   -- Y below this = lobby, auto-off punch
 
 local STOP_DIST   = 4
@@ -45,7 +45,6 @@ local noFallBV      = nil
 local freeFlyBV     = nil
 local ghostActive   = false
 local toggleAutoPunch = nil
-local toggleGodMode   = nil
 
 -- ── Confirmed remotes ─────────────────────────────────────────────────────────
 local remoteAction  = nil
@@ -229,13 +228,6 @@ RunService.Heartbeat:Connect(function(dt)
     local holding = hasBomb(c)
     local myY     = r.Position.Y
 
-    -- God Mode: lock health to max every frame (client-side best effort)
-    if cfg.GodMode then
-        if h.Health < h.MaxHealth then
-            h.Health = h.MaxHealth
-        end
-    end
-
     -- Auto-disable AutoPunch when we return to lobby (Y drops below threshold)
     -- This is the fallback for round-end since we have no server timer
     if cfg.AutoPunch and myY < LOBBY_Y_THRESH then
@@ -337,13 +329,27 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- Auto Punch: tighter Y filter (PUNCH_Y_DIFF=8) to avoid lobby targets
+    -- Auto Punch:
+    -- - PUNCH_Y_DIFF=8: tighter vertical filter than general (avoids lobby/spectator)
+    -- - PUNCH_DIST_MAX=15: only scan nearby players, never reaches spectator area
+    -- - No MoveTo: character stays still, just punches when target enters range
+    -- - No Fall auto-ON: arena floor needed for stable positioning
     if cfg.AutoPunch then
+        -- Auto-enable No Fall while punching so we stay grounded on arena
+        if cfg.NoFall and noFallBV then
+            local vel = r.AssemblyLinearVelocity
+            if vel.Y < 0 then
+                noFallBV.MaxForce = Vector3.new(0, 1e6, 0)
+                noFallBV.Velocity = Vector3.new(0, 0, 0)
+            else
+                noFallBV.MaxForce = Vector3.new(0, 0, 0)
+            end
+        end
         local target, dist = nearestPlayer(PUNCH_Y_DIFF)
-        if target and target.Character then
+        -- Only punch if target is within PUNCH_DIST_MAX (never reaches spectators)
+        if target and target.Character and dist <= PUNCH_DIST_MAX then
             local oh = getHRP(target.Character)
             if oh then
-                if dist > STOP_DIST then h:MoveTo(oh.Position) end
                 punchTimer = punchTimer + dt
                 if dist <= PUNCH_RANGE and punchTimer >= PUNCH_RATE then
                     punchTimer = 0
@@ -366,11 +372,10 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
     debugLabel.Text = string.format(
-        "dist: %s (%s)\nbomb: %s\nplayers: %d\nY: %.1f | god: %s",
+        "dist: %s (%s)\nbomb: %s\nplayers: %d\nY: %.1f",
         distStr, zoneStr,
         holding and "YES" or "no",
-        count, myY,
-        cfg.GodMode and "ON" or "off")
+        count, myY)
 end)
 
 -- ── CharacterAdded ────────────────────────────────────────────────────────────
@@ -428,10 +433,6 @@ toggleAutoPunch = Window:Toggle("Auto Punch", false, function(s)
     cfg.AutoPunch = s
     punchTimer    = 0
 end)
-toggleGodMode = Window:Toggle("God Mode", false, function(s)
-    cfg.GodMode = s
-end)
-
 -- Ability scanner: filter RS for speed/ability/boost paths (bug bounty audit)
 -- Tap button → results appear top-right for 20s then auto-hide
 Window:Button("Scan Abilities", function()
