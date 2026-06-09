@@ -15,7 +15,6 @@ local cfg = {
     BombTeleport = false,
     Noclip       = false,
     SpeedEnabled = false,
-    NoFall       = false,
     FreeFly      = false,
     AutoPunch    = false,
 }
@@ -42,6 +41,7 @@ local punchTimer    = 0
 local teleportTimer = 0
 local noclipTimer   = 0
 local noFallBV      = nil
+local punchNoFallBV = nil  -- dedicated BV for Auto Punch, independent of cfg.NoFall
 local freeFlyBV     = nil
 local ghostActive   = false
 local toggleAutoPunch = nil
@@ -301,17 +301,6 @@ RunService.Heartbeat:Connect(function(dt)
                 h:MoveTo(oh.Position + dirXZ.Unit * 8)
             end
         end
-    else
-        -- No Fall: cancel downward velocity (skip if FreeFly active)
-        if cfg.NoFall and noFallBV and not cfg.FreeFly then
-            local vel = r.AssemblyLinearVelocity
-            if vel.Y < 0 then
-                noFallBV.MaxForce = Vector3.new(0, 1e6, 0)
-                noFallBV.Velocity = Vector3.new(0, 0, 0)
-            else
-                noFallBV.MaxForce = Vector3.new(0, 0, 0)
-            end
-        end
     end
 
     -- Free Fly: suspend while chasing
@@ -330,23 +319,29 @@ RunService.Heartbeat:Connect(function(dt)
     end
 
     -- Auto Punch:
-    -- - PUNCH_Y_DIFF=8: tighter vertical filter than general (avoids lobby/spectator)
-    -- - PUNCH_DIST_MAX=15: only scan nearby players, never reaches spectator area
-    -- - No MoveTo: character stays still, just punches when target enters range
-    -- - No Fall auto-ON: arena floor needed for stable positioning
+    -- - Own dedicated BodyVelocity (punchNoFallBV) — no dependency on cfg.NoFall toggle
+    -- - PUNCH_Y_DIFF=8: tighter vertical filter (avoids lobby/spectator)
+    -- - PUNCH_DIST_MAX=15: only targets players within 15 studs, never reaches spectators
+    -- - No MoveTo: character stays still, punches when target enters range
     if cfg.AutoPunch then
-        -- Auto-enable No Fall while punching so we stay grounded on arena
-        if cfg.NoFall and noFallBV then
-            local vel = r.AssemblyLinearVelocity
-            if vel.Y < 0 then
-                noFallBV.MaxForce = Vector3.new(0, 1e6, 0)
-                noFallBV.Velocity = Vector3.new(0, 0, 0)
-            else
-                noFallBV.MaxForce = Vector3.new(0, 0, 0)
-            end
+        -- Setup dedicated no-fall BV if not already created
+        if not punchNoFallBV then
+            local bv    = Instance.new("BodyVelocity")
+            bv.Name     = "PunchNoFallBV"
+            bv.Velocity = Vector3.new(0, 0, 0)
+            bv.MaxForce = Vector3.new(0, 0, 0)
+            bv.Parent   = r
+            punchNoFallBV = bv
+        end
+        -- Apply no-fall via dedicated BV
+        local vel = r.AssemblyLinearVelocity
+        if vel.Y < 0 then
+            punchNoFallBV.MaxForce = Vector3.new(0, 1e6, 0)
+            punchNoFallBV.Velocity = Vector3.new(0, 0, 0)
+        else
+            punchNoFallBV.MaxForce = Vector3.new(0, 0, 0)
         end
         local target, dist = nearestPlayer(PUNCH_Y_DIFF)
-        -- Only punch if target is within PUNCH_DIST_MAX (never reaches spectators)
         if target and target.Character and dist <= PUNCH_DIST_MAX then
             local oh = getHRP(target.Character)
             if oh then
@@ -356,6 +351,12 @@ RunService.Heartbeat:Connect(function(dt)
                     firePunch(target.Character, oh)
                 end
             end
+        end
+    else
+        -- Clean up dedicated BV when Auto Punch is off
+        if punchNoFallBV then
+            pcall(function() punchNoFallBV:Destroy() end)
+            punchNoFallBV = nil
         end
     end
 
@@ -380,7 +381,7 @@ end)
 
 -- ── CharacterAdded ────────────────────────────────────────────────────────────
 LocalPlayer.CharacterAdded:Connect(function()
-    noFallBV = nil; freeFlyBV = nil; ghostActive = false
+    noFallBV = nil; punchNoFallBV = nil; freeFlyBV = nil; ghostActive = false
     noclipTimer = 0; teleportTimer = 0; punchTimer = 0
 
     if cfg.AutoPunch then
@@ -390,12 +391,8 @@ LocalPlayer.CharacterAdded:Connect(function()
         end
     end
 
-    -- God Mode survives respawn — re-hook health on new character
-    -- (Heartbeat loop picks it up automatically, no extra setup needed)
-
     task.wait(1)
     if cfg.FreeFly then setupFreeFly(true) end
-    if cfg.NoFall  then setupNoFall(true)  end
 end)
 
 -- ── UI ────────────────────────────────────────────────────────────────────────
@@ -423,19 +420,19 @@ Window:Button("Speed 26 (match P2W)", function()
     local h = getHum(getChar())
     if h then h.WalkSpeed = cfg.SpeedEnabled and SPEED_BOMB or SPEED_DEFAULT end
 end)
-Window:Toggle("No Fall",  false, function(s) cfg.NoFall = s; setupNoFall(s) end)
 Window:Toggle("Free Fly", false, function(s)
     cfg.FreeFly = s
     setupFreeFly(s)
-    if not s and cfg.NoFall then setupNoFall(true) end
 end)
 toggleAutoPunch = Window:Toggle("Auto Punch", false, function(s)
     cfg.AutoPunch = s
     punchTimer    = 0
 end)
--- Ability scanner: filter RS for speed/ability/boost paths (bug bounty audit)
--- Tap button → results appear top-right for 20s then auto-hide
+-- Ability scanner + AbilityCatalog dump (bug bounty audit)
 Window:Button("Scan Abilities", function()
+    local lines = {}
+
+    -- 1. Filter RS descendants by keyword
     local hits = {}
     for _, v in ipairs(RS:GetDescendants()) do
         local name = v.Name
@@ -445,18 +442,58 @@ Window:Button("Scan Abilities", function()
             table.insert(hits, string.format("[%s] %s%s", v.ClassName, v:GetFullName(), valStr))
         end
     end
-    if #hits == 0 then
-        abilityLabel.Text = "[Scan] No ability/speed/boost values found in RS"
+    table.insert(lines, "[RS scan] " .. #hits .. " hits:")
+    for i = 1, math.min(#hits, 8) do table.insert(lines, hits[i]) end
+    if #hits > 8 then table.insert(lines, "...+" .. (#hits-8) .. " more") end
+
+    -- 2. Require AbilityCatalog and dump names + speed values
+    table.insert(lines, ""); table.insert(lines, "[AbilityCatalog]")
+    local catalogModule = RS:FindFirstChild("Shared")
+        and RS.Shared:FindFirstChild("AbilityCatalog")
+    if catalogModule then
+        local ok, catalog = pcall(require, catalogModule)
+        if ok and type(catalog) == "table" then
+            local count = 0
+            for id, data in pairs(catalog) do
+                count = count + 1
+                if count <= 12 then
+                    local extra = ""
+                    if type(data) == "table" then
+                        local spd = data.Speed or data.speed or data.WalkSpeed
+                        local dur = data.Duration or data.duration
+                        local nm  = data.Name or data.name or tostring(id)
+                        if spd then extra = extra .. " spd=" .. tostring(spd) end
+                        if dur then extra = extra .. " dur=" .. tostring(dur) end
+                        table.insert(lines, string.format("  [%s] %s%s", tostring(id), nm, extra))
+                    else
+                        table.insert(lines, string.format("  [%s]=%s", tostring(id), tostring(data)))
+                    end
+                end
+            end
+            if count > 12 then table.insert(lines, "  ...+" .. (count-12) .. " more") end
+            table.insert(lines, "Total: " .. count .. " abilities")
+        else
+            table.insert(lines, "require failed: " .. tostring(catalog))
+        end
     else
-        local lines = {"[Scan] " .. #hits .. " hits:"}
-        for i = 1, math.min(#hits, 20) do
-            table.insert(lines, hits[i])
-        end
-        if #hits > 20 then
-            table.insert(lines, "...and " .. (#hits - 20) .. " more")
-        end
-        abilityLabel.Text = table.concat(lines, "\n")
+        table.insert(lines, "Not found in RS.Shared")
     end
+
+    -- 3. AbilityUseEvent bypass test — fire P2W ability without owning it
+    table.insert(lines, ""); table.insert(lines, "[AbilityUseEvent bypass test]")
+    local abilityUse = RS:FindFirstChild("Remotes")
+        and RS.Remotes:FindFirstChild("Events")
+        and RS.Remotes.Events:FindFirstChild("AbilityUseEvent")
+    if abilityUse then
+        local fired, err = pcall(function() abilityUse:FireServer("Faster") end)
+        table.insert(lines, fired
+            and "FireServer(Faster) accepted -- POTENTIAL BYPASS"
+            or  "Rejected: " .. tostring(err))
+    else
+        table.insert(lines, "AbilityUseEvent not found")
+    end
+
+    abilityLabel.Text = table.concat(lines, "\n")
     abilityLabel.Visible = true
-    task.delay(20, function() abilityLabel.Visible = false end)
+    task.delay(25, function() abilityLabel.Visible = false end)
 end)
