@@ -1,5 +1,7 @@
-local Players    = game:GetService("Players")
-local RunService = game:GetService("RunService")
+local Players     = game:GetService("Players")
+local RunService  = game:GetService("RunService")
+local RS          = game:GetService("ReplicatedStorage")
+local VIM         = game:GetService("VirtualInputManager")
 local LocalPlayer = Players.LocalPlayer
 
 local Library = loadstring(game:HttpGet(
@@ -7,6 +9,7 @@ local Library = loadstring(game:HttpGet(
 ))()
 local Window = Library:Window("POE Assist")
 
+-- ── Config flags ──────────────────────────────────────────────────────────────
 local cfg = {
     AutoPassBomb = false,
     BombTeleport = false,
@@ -17,45 +20,41 @@ local cfg = {
     AutoPunch    = false,
 }
 
--- Speed auto-management (no manual buttons needed):
--- SpeedEnabled ON  + holding bomb → 22 (full chase speed)
--- SpeedEnabled ON  + idle         → 20 (subtle)
--- SpeedEnabled OFF                → 16 (game default)
-local SPEED_BOMB    = 22
-local SPEED_IDLE    = 20
-local SPEED_DEFAULT = 16
+-- ── Tunable constants ─────────────────────────────────────────────────────────
+local SPEED_BOMB    = 22   -- walkspeed while chasing to pass bomb
+local SPEED_IDLE    = 20   -- walkspeed when speed boost on but not chasing
+local SPEED_DEFAULT = 16   -- game default
 
--- Only target players within this distance (filters lobby spectators)
-local MAX_TARGET_DIST = 200
+local MAX_TARGET_DIST = 200  -- ignore players further than this (studs)
+local MAX_Y_DIFF      = 15   -- max vertical diff to consider same arena
 
--- Max Y difference to consider a player in the same arena (filters lobby/spectators when NoFall is on)
-local MAX_Y_DIFF = 15
-
-local STOP_DIST   = 4
-local NEAR_DIST   = 10
-local PUNCH_RANGE = 6
-local PUNCH_RATE  = 0.45
+local STOP_DIST   = 4    -- stop chasing when this close (studs)
+local NEAR_DIST   = 10   -- "CLOSE" zone label threshold
+local PUNCH_RANGE = 6    -- fire punch when within this range
+local PUNCH_RATE  = 0.45 -- seconds between punch attempts
 local FLY_SPEED   = 40
 
-local moveTimer      = 0
-local punchTimer     = 0
-local teleportTimer  = 0
-local noclipTimer    = 0
-local noFallBV       = nil
-local freeFlyBV      = nil
-local ghostActive    = false
+-- ── State ─────────────────────────────────────────────────────────────────────
+local punchTimer    = 0
+local teleportTimer = 0
+local noclipTimer   = 0
+local noFallBV      = nil
+local freeFlyBV     = nil
+local ghostActive   = false
+local toggleAutoPunch = nil  -- UI ref for CharacterAdded sync
 
--- UI toggle references — needed so CharacterAdded can sync toggle state
-local toggleAutoPunch = nil
-
-local RS            = game:GetService("ReplicatedStorage")
+-- ── Confirmed remotes (path verified via scan) ────────────────────────────────
 local remoteAction  = nil
 local remoteEndgame = nil
 task.spawn(function()
-    remoteAction  = RS:WaitForChild("ActionEvent", 15)
-    remoteEndgame = RS:WaitForChild("EndgameAttackEvent", 15)
+    local events = RS:WaitForChild("Remotes", 10)
+        and RS.Remotes:WaitForChild("Events", 10)
+    if not events then return end
+    remoteAction  = events:WaitForChild("ActionEvent",      10)
+    remoteEndgame = events:WaitForChild("EndgameAttackEvent", 10)
 end)
 
+-- ── Helpers ───────────────────────────────────────────────────────────────────
 local function getChar() return LocalPlayer.Character end
 local function getHum(c) return c and c:FindFirstChildOfClass("Humanoid") end
 local function getHRP(c) return c and c:FindFirstChild("HumanoidRootPart") end
@@ -68,13 +67,12 @@ local function hasBomb(c)
     local bv = c:FindFirstChild("BombActive")
     if bv and bv:IsA("BoolValue") and bv.Value then return true end
     local ok, val = pcall(function() return c:GetAttribute("BombActive") end)
-    if ok and val == true then return true end
-    return false
+    return ok and val == true
 end
 
--- Filter: only in-round players (alive, within MAX_TARGET_DIST, not spectating)
--- requireSameHeight: if true, also filters players outside MAX_Y_DIFF vertically
--- Used by AutoPunch to avoid targeting lobby/spectator players when NoFall lifts us off arena
+-- Returns nearest alive player.
+-- requireSameHeight=true: skip players whose Y differs by more than MAX_Y_DIFF
+-- (prevents targeting lobby spectators when NoFall keeps us elevated)
 local function nearestPlayer(requireSameHeight)
     local c = getChar(); local h = getHRP(c)
     if not h then return nil, math.huge end
@@ -84,12 +82,12 @@ local function nearestPlayer(requireSameHeight)
             local oh = getHRP(p.Character)
             local ph = getHum(p.Character)
             if oh and ph and ph.Health > 0 then
-                local d = (h.Position - oh.Position).Magnitude
+                local d     = (h.Position - oh.Position).Magnitude
                 local yDiff = math.abs(h.Position.Y - oh.Position.Y)
                 local heightOk = (not requireSameHeight) or (yDiff <= MAX_Y_DIFF)
                 if d < bestDist and d <= MAX_TARGET_DIST and heightOk then
                     bestDist = d
-                    best = p
+                    best     = p
                 end
             end
         end
@@ -99,12 +97,13 @@ end
 
 local LEG_NAMES = {
     "LeftFoot","RightFoot","LeftLowerLeg","RightLowerLeg",
-    "LeftUpperLeg","RightUpperLeg","Left Leg","Right Leg"
+    "LeftUpperLeg","RightUpperLeg","Left Leg","Right Leg",
 }
 local function isLeg(name)
     for _, n in ipairs(LEG_NAMES) do if name == n then return true end end
     return false
 end
+
 local function applyNoclip(c, on)
     for _, p in ipairs(c:GetDescendants()) do
         if p:IsA("BasePart") and not isLeg(p.Name) then
@@ -117,35 +116,31 @@ end
 
 local function setupNoFall(enable)
     if noFallBV then pcall(function() noFallBV:Destroy() end); noFallBV = nil end
-    if enable then
-        local r = getHRP(getChar())
-        if r then
-            local bv    = Instance.new("BodyVelocity")
-            bv.Name     = "NoFallBV"
-            bv.Velocity = Vector3.new(0, 0, 0)
-            bv.MaxForce = Vector3.new(0, 0, 0)
-            bv.Parent   = r
-            noFallBV    = bv
-        end
-    end
+    if not enable then return end
+    local r = getHRP(getChar())
+    if not r then return end
+    local bv    = Instance.new("BodyVelocity")
+    bv.Name     = "NoFallBV"
+    bv.Velocity = Vector3.new(0, 0, 0)
+    bv.MaxForce = Vector3.new(0, 0, 0)
+    bv.Parent   = r
+    noFallBV    = bv
 end
 
 local function setupFreeFly(enable)
     if freeFlyBV then pcall(function() freeFlyBV:Destroy() end); freeFlyBV = nil end
-    if enable then
-        local r = getHRP(getChar())
-        if r then
-            local bv    = Instance.new("BodyVelocity")
-            bv.Name     = "FreeFlyBV"
-            bv.MaxForce = Vector3.new(1e6, 1e6, 1e6)
-            bv.Velocity = Vector3.new(0, 0, 0)
-            bv.Parent   = r
-            freeFlyBV   = bv
-        end
-    end
+    if not enable then return end
+    local r = getHRP(getChar())
+    if not r then return end
+    local bv    = Instance.new("BodyVelocity")
+    bv.Name     = "FreeFlyBV"
+    bv.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+    bv.Velocity = Vector3.new(0, 0, 0)
+    bv.Parent   = r
+    freeFlyBV   = bv
 end
 
-local VIM = game:GetService("VirtualInputManager")
+-- Fires punch via confirmed remotes + VIM screen tap at target position
 local function firePunch(targetChar, targetHRP)
     if remoteAction then
         pcall(function() remoteAction:FireServer("Punch") end)
@@ -167,20 +162,16 @@ local function firePunch(targetChar, targetHRP)
     end)
 end
 
--- ── Debug overlay ────────────────────────────────────────────────────────────
--- Defined before Heartbeat so labels are never nil when the loop runs.
--- Layout:
---   [debugLabel]  top-left  — live game stats (dist/bomb/players), always visible
---   [scanPanel]   full-screen scrollable list — only visible after a scan
--- ─────────────────────────────────────────────────────────────────────────────
+-- ── Minimal debug label ───────────────────────────────────────────────────────
+-- Shows: dist to nearest / bomb status / player count / own Y
+-- Small footprint, no scan panel, no exports
 local debugGui = Instance.new("ScreenGui")
 debugGui.Name         = "POEDebug"
 debugGui.ResetOnSpawn = false
 debugGui.Parent       = LocalPlayer.PlayerGui
 
--- Live stats label (always on)
 local debugLabel = Instance.new("TextLabel")
-debugLabel.Size                   = UDim2.new(0, 190, 0, 70)
+debugLabel.Size                   = UDim2.new(0, 200, 0, 72)
 debugLabel.Position               = UDim2.new(0, 8, 0.45, 0)
 debugLabel.BackgroundColor3       = Color3.fromRGB(0, 0, 0)
 debugLabel.BackgroundTransparency = 0.45
@@ -193,92 +184,16 @@ debugLabel.Text                   = "initializing..."
 debugLabel.BorderSizePixel        = 0
 debugLabel.Parent                 = debugGui
 
--- Scan panel — scrollable overlay shown after Scan button pressed
-local scanFrame = Instance.new("Frame")
-scanFrame.Size              = UDim2.new(1, -16, 0.55, 0)
-scanFrame.Position          = UDim2.new(0, 8, 0, 8)
-scanFrame.BackgroundColor3  = Color3.fromRGB(10, 10, 10)
-scanFrame.BackgroundTransparency = 0.15
-scanFrame.BorderSizePixel   = 0
-scanFrame.Visible           = false
-scanFrame.Parent            = debugGui
-
--- Close button inside scan panel
-local closeBtn = Instance.new("TextButton")
-closeBtn.Size            = UDim2.new(0, 60, 0, 24)
-closeBtn.Position        = UDim2.new(1, -64, 0, 4)
-closeBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
-closeBtn.TextColor3      = Color3.fromRGB(255, 255, 255)
-closeBtn.TextSize        = 13
-closeBtn.Font            = Enum.Font.GothamBold
-closeBtn.Text            = "CLOSE"
-closeBtn.BorderSizePixel = 0
-closeBtn.Parent          = scanFrame
-closeBtn.MouseButton1Click:Connect(function()
-    scanFrame.Visible = false
-end)
-
--- Page label inside scan panel
-local pageLabel = Instance.new("TextLabel")
-pageLabel.Size              = UDim2.new(1, -70, 0, 24)
-pageLabel.Position          = UDim2.new(0, 4, 0, 4)
-pageLabel.BackgroundTransparency = 1
-pageLabel.TextColor3        = Color3.fromRGB(255, 220, 80)
-pageLabel.TextSize          = 12
-pageLabel.Font              = Enum.Font.GothamBold
-pageLabel.TextXAlignment    = Enum.TextXAlignment.Left
-pageLabel.Text              = "Scan Results"
-pageLabel.Parent            = scanFrame
-
--- Scrollable content inside scan panel
-local scrollFrame = Instance.new("ScrollingFrame")
-scrollFrame.Size              = UDim2.new(1, 0, 1, -32)
-scrollFrame.Position          = UDim2.new(0, 0, 0, 30)
-scrollFrame.BackgroundTransparency = 1
-scrollFrame.BorderSizePixel   = 0
-scrollFrame.ScrollBarThickness = 6
-scrollFrame.CanvasSize        = UDim2.new(0, 0, 0, 0)
-scrollFrame.Parent            = scanFrame
-
-local listLayout = Instance.new("UIListLayout")
-listLayout.SortOrder  = Enum.SortOrder.LayoutOrder
-listLayout.Padding    = UDim.new(0, 2)
-listLayout.Parent     = scrollFrame
-
--- Helper: add a line to the scan panel
-local function addScanLine(text, color)
-    local lbl = Instance.new("TextLabel")
-    lbl.Size                   = UDim2.new(1, -8, 0, 16)
-    lbl.BackgroundTransparency = 1
-    lbl.TextColor3             = color or Color3.fromRGB(200, 200, 200)
-    lbl.TextSize               = 11
-    lbl.Font                   = Enum.Font.Code
-    lbl.TextXAlignment         = Enum.TextXAlignment.Left
-    lbl.TextWrapped            = true
-    lbl.Text                   = text
-    lbl.Parent                 = scrollFrame
-    -- Expand canvas height to fit new line
-    scrollFrame.CanvasSize = UDim2.new(0, 0, 0,
-        listLayout.AbsoluteContentSize.Y + 8)
-    return lbl
-end
-
-local function clearScanPanel()
-    for _, v in ipairs(scrollFrame:GetChildren()) do
-        if v:IsA("TextLabel") then v:Destroy() end
-    end
-    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
-end
-
--- ── Main Heartbeat ────────────────────────────────────────────────────────────
+-- ── Main loop ─────────────────────────────────────────────────────────────────
 RunService.Heartbeat:Connect(function(dt)
     local c = getChar(); local h = getHum(c)
     if not h or h.Health <= 0 then return end
     local r = getHRP(c)
+    if not r then return end
 
     local holding = hasBomb(c)
 
-    -- Auto speed: bomb = 22, idle = 20, off = 16
+    -- Speed management
     local targetSpd = SPEED_DEFAULT
     if cfg.SpeedEnabled then
         targetSpd = (holding and (cfg.AutoPassBomb or cfg.BombTeleport))
@@ -286,7 +201,7 @@ RunService.Heartbeat:Connect(function(dt)
     end
     if h.WalkSpeed ~= targetSpd then h.WalkSpeed = targetSpd end
 
-    -- Ghost: re-apply every 0.3s so teleports/rewards don't reset it
+    -- Ghost: re-apply every 0.3s so round transitions don't reset it
     if cfg.Noclip then
         noclipTimer = noclipTimer + dt
         if noclipTimer >= 0.3 then
@@ -298,32 +213,26 @@ RunService.Heartbeat:Connect(function(dt)
         noclipTimer = 0
     end
 
-    -- Bomb Teleport: appear in front of target, face them
-    -- 0.25s cooldown to avoid physics spam
-    -- requireSameHeight=true: skip lobby/spectator players with large Y diff
-    -- Post-teleport safety: if we land outside arena (Y drops > 12 studs from
-    -- where we were), snap back to pre-teleport position immediately
+    -- Bomb Teleport: snap in front of nearest same-height player
+    -- 0.25s cooldown; post-teleport Y-drop safety snaps back if we fell off arena
     if cfg.BombTeleport and holding then
         teleportTimer = teleportTimer + dt
         if teleportTimer >= 0.25 then
             teleportTimer = 0
-            local target, _ = nearestPlayer(true)  -- height-filtered
+            local target, _ = nearestPlayer(true)
             if target and target.Character then
                 local oh = getHRP(target.Character)
                 if oh then
-                    local preY    = r.Position.Y
-                    local facing  = oh.CFrame.LookVector
-                    local newPos  = oh.Position + Vector3.new(facing.X, 0, facing.Z) * 3
-                    local preCF   = r.CFrame  -- save before teleport
-
-                    r.CFrame = CFrame.new(newPos, oh.Position)
-
-                    -- Safety: if we ended up more than 12 studs below where we
-                    -- started (fell off arena edge), snap back instantly
+                    local preY  = r.Position.Y
+                    local preCF = r.CFrame
+                    local dir   = oh.CFrame.LookVector
+                    r.CFrame    = CFrame.new(
+                        oh.Position + Vector3.new(dir.X, 0, dir.Z) * 3,
+                        oh.Position)
                     task.defer(function()
-                        local postR = getHRP(getChar())
-                        if postR and (preY - postR.Position.Y) > 12 then
-                            postR.CFrame = preCF
+                        local pr = getHRP(getChar())
+                        if pr and (preY - pr.Position.Y) > 12 then
+                            pr.CFrame = preCF
                         end
                     end)
                 end
@@ -333,38 +242,34 @@ RunService.Heartbeat:Connect(function(dt)
         teleportTimer = 0
     end
 
-    -- Auto Pass Bomb: overshoot MoveTo so Humanoid never reaches the goal
-    -- and never enters the internal deceleration zone near the destination.
-    -- We target a point slightly PAST the player (dir * overshoot) so the
-    -- pathfinder stays in full-sprint state every frame.
+    -- Auto Pass Bomb: overshoot MoveTo so Humanoid never enters deceleration zone
     if cfg.AutoPassBomb and not cfg.BombTeleport and holding then
         local target, dist = nearestPlayer()
         if target and target.Character then
             local oh = getHRP(target.Character)
             if oh and dist > STOP_DIST then
-                local dir = (oh.Position - r.Position)
-                local dirXZ = Vector3.new(dir.X, 0, dir.Z)
-                -- Overshoot by 8 studs past target so we never "arrive"
-                local overshoot = oh.Position + dirXZ.Unit * 8
-                h:MoveTo(overshoot)
+                local dirXZ = Vector3.new(
+                    oh.Position.X - r.Position.X, 0,
+                    oh.Position.Z - r.Position.Z)
+                h:MoveTo(oh.Position + dirXZ.Unit * 8)
             end
         end
     end
 
-    -- No Fall (skip if FreeFly handles Y)
-    if cfg.NoFall and noFallBV and r and not cfg.FreeFly then
+    -- No Fall: cancel downward velocity (skip if FreeFly is active)
+    if cfg.NoFall and noFallBV and not cfg.FreeFly then
         local vel = r.AssemblyLinearVelocity
         if vel.Y < 0 then
             noFallBV.MaxForce = Vector3.new(0, 1e6, 0)
-            noFallBV.Velocity  = Vector3.new(0, 0, 0)
+            noFallBV.Velocity = Vector3.new(0, 0, 0)
         else
             noFallBV.MaxForce = Vector3.new(0, 0, 0)
         end
     end
 
-    -- Free Fly: suppress while chasing bomb (need to descend to target)
+    -- Free Fly: suspend while actively chasing to pass bomb
     local bombChasing = holding and (cfg.AutoPassBomb or cfg.BombTeleport)
-    if cfg.FreeFly and freeFlyBV and r then
+    if cfg.FreeFly and freeFlyBV then
         if bombChasing then
             freeFlyBV.MaxForce = Vector3.new(0, 0, 0)
         else
@@ -372,21 +277,14 @@ RunService.Heartbeat:Connect(function(dt)
             local cam     = workspace.CurrentCamera
             local moveDir = h.MoveDirection
             local pitchY  = cam.CFrame.LookVector.Y
-            if moveDir.Magnitude > 0 then
-                freeFlyBV.Velocity = Vector3.new(
-                    moveDir.X * FLY_SPEED,
-                    pitchY   * FLY_SPEED,
-                    moveDir.Z * FLY_SPEED
-                )
-            else
-                freeFlyBV.Velocity = Vector3.new(0, 0, 0)
-            end
+            freeFlyBV.Velocity = moveDir.Magnitude > 0
+                and Vector3.new(moveDir.X * FLY_SPEED, pitchY * FLY_SPEED, moveDir.Z * FLY_SPEED)
+                or  Vector3.new(0, 0, 0)
         end
     end
 
-    -- Auto Punch: requireSameHeight=true to avoid targeting lobby/spectator players
-    -- especially when NoFall keeps us elevated above the arena floor
-    if cfg.AutoPunch and r then
+    -- Auto Punch: height-filtered to avoid targeting lobby/spectator players
+    if cfg.AutoPunch then
         local target, dist = nearestPlayer(true)
         if target and target.Character then
             local oh = getHRP(target.Character)
@@ -401,36 +299,32 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- Live stats label (always visible, small footprint)
-    local nearest2, dist2 = nearestPlayer()
-    local distStr = dist2 == math.huge and "--" or string.format("%.1f", dist2)
-    local zoneStr = dist2 <= STOP_DIST and "STOP"
-                 or dist2 <= NEAR_DIST  and "CLOSE"
-                 or "FAR"
+    -- Debug label update
+    local _, dist2 = nearestPlayer()
+    local distStr  = dist2 == math.huge and "--" or string.format("%.1f", dist2)
+    local zoneStr  = dist2 <= STOP_DIST and "STOP"
+                  or dist2 <= NEAR_DIST  and "CLOSE"
+                  or "FAR"
     local count = 0
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer and p.Character and getHRP(p.Character) then
             count = count + 1
         end
     end
-    local myR = getHRP(getChar())
-    local myY = myR and string.format("%.1f", myR.Position.Y) or "--"
-    debugLabel.Size = UDim2.new(0, 200, 0, 90)
     debugLabel.Text = string.format(
-        "dist: %s (%s)\nbomb: %s\nplayers: %d\nY: %s",
-        distStr, zoneStr, holding and "YES" or "no", count, myY
-    )
+        "dist: %s (%s)\nbomb: %s\nplayers: %d\nY: %.1f",
+        distStr, zoneStr,
+        holding and "YES" or "no",
+        count, r.Position.Y)
 end)
 
--- CharacterAdded: reset physics objects + auto-disable AutoPunch
--- AutoPunch uses VIM mouse events — if it fires during lobby teleport it
--- lands on the virtual joystick area and locks input until toggled off
+-- ── CharacterAdded ────────────────────────────────────────────────────────────
+-- Reset physics state + auto-disable AutoPunch so VIM clicks don't land on
+-- the virtual joystick after lobby teleport
 LocalPlayer.CharacterAdded:Connect(function()
     noFallBV = nil; freeFlyBV = nil; ghostActive = false
     noclipTimer = 0; teleportTimer = 0; punchTimer = 0
 
-    -- Disable AutoPunch on respawn/teleport to lobby so VIM clicks
-    -- don't overlap the joystick and break movement controls
     if cfg.AutoPunch then
         cfg.AutoPunch = false
         if toggleAutoPunch then
@@ -444,107 +338,22 @@ LocalPlayer.CharacterAdded:Connect(function()
 end)
 
 -- ── UI ────────────────────────────────────────────────────────────────────────
-Window:Toggle("Auto Pass Bomb",  false, function(state) cfg.AutoPassBomb = state; moveTimer = 0 end)
-Window:Toggle("Bomb Teleport",   false, function(state) cfg.BombTeleport = state end)
-Window:Toggle("Ghost Mode",      false, function(state)
-    cfg.Noclip = state
-    if not state and ghostActive then
+Window:Toggle("Auto Pass Bomb", false, function(s) cfg.AutoPassBomb = s end)
+Window:Toggle("Bomb Teleport",  false, function(s) cfg.BombTeleport = s end)
+Window:Toggle("Ghost Mode",     false, function(s)
+    cfg.Noclip = s
+    if not s and ghostActive then
         local c = getChar(); if c then applyNoclip(c, false) end
     end
 end)
-Window:Toggle("Speed Boost",     false, function(state) cfg.SpeedEnabled = state end)
-Window:Toggle("No Fall",         false, function(state) cfg.NoFall = state; setupNoFall(state) end)
-Window:Toggle("Free Fly",        false, function(state)
-    cfg.FreeFly = state
-    setupFreeFly(state)
-    if not state and cfg.NoFall then setupNoFall(true) end
+Window:Toggle("Speed Boost",    false, function(s) cfg.SpeedEnabled = s end)
+Window:Toggle("No Fall",        false, function(s) cfg.NoFall = s; setupNoFall(s) end)
+Window:Toggle("Free Fly",       false, function(s)
+    cfg.FreeFly = s
+    setupFreeFly(s)
+    if not s and cfg.NoFall then setupNoFall(true) end
 end)
--- Store reference so CharacterAdded can sync the toggle UI state
-toggleAutoPunch = Window:Toggle("Auto Punch", false, function(state)
-    cfg.AutoPunch = state
-    punchTimer = 0
-end)
-
--- ── Scan button ───────────────────────────────────────────────────────────────
--- Scans RS + workspace and displays results in an on-screen scrollable panel.
--- Run while holding the bomb to identify timer values.
--- Also scans RemoteEvents/RemoteFunctions to help identify punch remotes.
--- Results stay on screen until you tap CLOSE.
-Window:Button("Scan Values (on-screen)", function()
-    clearScanPanel()
-    scanFrame.Visible = true
-    pageLabel.Text = "Scanning..."
-
-    local timerHits   = {}  -- NumberValue/IntValue candidates
-    local remoteHits  = {}  -- RemoteEvent / RemoteFunction
-    local otherHits   = {}  -- StringValue / BoolValue / misc
-
-    local function scanContainer(container, prefix)
-        for _, v in ipairs(container:GetDescendants()) do
-            local cn = v.ClassName
-            if cn == "NumberValue" or cn == "IntValue" then
-                local ok, val = pcall(function() return v.Value end)
-                if ok then
-                    table.insert(timerHits, string.format(
-                        "[%s] %s = %s", cn, v:GetFullName(), tostring(val)))
-                end
-            elseif cn == "StringValue" then
-                local ok, val = pcall(function() return v.Value end)
-                if ok then
-                    table.insert(otherHits, string.format(
-                        "[StringValue] %s = \"%s\"", v:GetFullName(), tostring(val)))
-                end
-            elseif cn == "BoolValue" then
-                local ok, val = pcall(function() return v.Value end)
-                if ok then
-                    table.insert(otherHits, string.format(
-                        "[BoolValue] %s = %s", v:GetFullName(), tostring(val)))
-                end
-            elseif cn == "RemoteEvent" or cn == "RemoteFunction" then
-                table.insert(remoteHits, string.format(
-                    "[%s] %s", cn, v:GetFullName()))
-            end
-        end
-    end
-
-    scanContainer(RS, "RS")
-    scanContainer(workspace, "WS")
-
-    -- Section: timer candidates
-    addScanLine("=== TIMER CANDIDATES (Number/Int) ===",
-        Color3.fromRGB(255, 220, 60))
-    if #timerHits == 0 then
-        addScanLine("  (none found)", Color3.fromRGB(160, 160, 160))
-    else
-        for _, line in ipairs(timerHits) do
-            addScanLine("  " .. line, Color3.fromRGB(100, 255, 100))
-        end
-    end
-
-    -- Section: remotes (punch / endgame detection)
-    addScanLine("=== REMOTES (Event/Function) ===",
-        Color3.fromRGB(255, 220, 60))
-    if #remoteHits == 0 then
-        addScanLine("  (none found)", Color3.fromRGB(160, 160, 160))
-    else
-        for _, line in ipairs(remoteHits) do
-            addScanLine("  " .. line, Color3.fromRGB(120, 200, 255))
-        end
-    end
-
-    -- Section: other values (strings/bools — game state flags)
-    addScanLine("=== OTHER VALUES (String/Bool) ===",
-        Color3.fromRGB(255, 220, 60))
-    if #otherHits == 0 then
-        addScanLine("  (none found)", Color3.fromRGB(160, 160, 160))
-    else
-        for _, line in ipairs(otherHits) do
-            addScanLine("  " .. line, Color3.fromRGB(200, 180, 255))
-        end
-    end
-
-    local total = #timerHits + #remoteHits + #otherHits
-    pageLabel.Text = string.format(
-        "Scan done: %d timer | %d remotes | %d other",
-        #timerHits, #remoteHits, #otherHits)
+toggleAutoPunch = Window:Toggle("Auto Punch", false, function(s)
+    cfg.AutoPunch = s
+    punchTimer    = 0
 end)
