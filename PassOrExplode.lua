@@ -85,6 +85,7 @@ local cfg = {
     SpeedEnabled = false,
     NoFall       = false,
     AutoPunch    = false,
+    AFK          = false,   -- AFK mode: auto handle bomb + idle naturally
 }
 
 local SPEED_BOMB      = 22
@@ -97,6 +98,36 @@ local STOP_DIST       = 4
 local PUNCH_RANGE     = 6
 local PUNCH_RATE      = 0.45
 local SPECTATOR_MARGIN = 12
+
+-- AFK mode constants
+local AFK_TELEPORT_THRESH = 3   -- teleport bomb if countdown <= this value
+local AFK_IDLE_SPEED      = 16  -- walk speed when AFK and not holding bomb
+
+-- ─── Bomb timer reader ────────────────────────────────────────────────────────
+-- Reads countdown from: Workspace.[carrier].BombActive.Handle.BillboardGui.Countdown
+-- Returns number (seconds remaining) or nil if bomb not found / not active
+local function getBombTimer()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Character then
+            local bombTool = p.Character:FindFirstChild("BombActive")
+            if bombTool then
+                local handle = bombTool:FindFirstChild("Handle")
+                if handle then
+                    local bb = handle:FindFirstChildOfClass("BillboardGui")
+                        or handle:FindFirstChild("BillboardGui")
+                    if bb then
+                        local lbl = bb:FindFirstChild("Countdown")
+                        if lbl and lbl:IsA("TextLabel") then
+                            local n = tonumber(lbl.Text)
+                            if n then return n, p end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil, nil
+end
 
 -- Arena Y: auto-detected each round, fallback 24
 local arenaY       = 24
@@ -307,8 +338,8 @@ RunService.Heartbeat:Connect(function(dt)
         applyNoclip(c, false); noclipTimer = 0
     end
 
-    -- Bomb Teleport
-    if cfg.BombTeleport and holding then
+    -- Bomb Teleport (manual, skip if AFK handles it)
+    if cfg.BombTeleport and not cfg.AFK and holding then
         teleportTimer = teleportTimer + dt
         if teleportTimer >= 0.25 then
             teleportTimer = 0
@@ -331,8 +362,53 @@ RunService.Heartbeat:Connect(function(dt)
         teleportTimer = 0
     end
 
-    -- Auto Pass Bomb
-    if cfg.AutoPassBomb and not cfg.BombTeleport and holding then
+    -- Bomb timer (read every frame, cheap)
+    local bombTimer, bombCarrier = getBombTimer()
+
+    -- AFK Mode: handles bomb automatically when holding, idles naturally when not
+    -- Logic:
+    --   holding + timer <= AFK_TELEPORT_THRESH → teleport (guaranteed pass, beats obstacles)
+    --   holding + timer >  AFK_TELEPORT_THRESH → run toward nearest player (overshoot)
+    --   not holding → stop movement, stand still (look natural)
+    if cfg.AFK then
+        if holding then
+            local target, dist = nearestPlayer(nil)
+            if target and target.Character then
+                local oh = getHRP(target.Character)
+                if oh then
+                    local shouldTeleport = bombTimer and bombTimer <= AFK_TELEPORT_THRESH
+                    if shouldTeleport or (cfg.BombTeleport) then
+                        -- Emergency teleport: snap in front of target
+                        local preCF = r.CFrame
+                        local preY  = r.Position.Y
+                        local dir   = oh.CFrame.LookVector
+                        r.CFrame    = CFrame.new(
+                            oh.Position + Vector3.new(dir.X,0,dir.Z)*3,
+                            oh.Position)
+                        task.defer(function()
+                            local pr = getHRP(getChar())
+                            if pr and (preY - pr.Position.Y) > 12 then
+                                pr.CFrame = preCF
+                            end
+                        end)
+                    elseif dist > STOP_DIST then
+                        -- Run toward target, overshoot so no decel zone
+                        if noFallBV then noFallBV.MaxForce = Vector3.new(0,0,0) end
+                        local d = Vector3.new(
+                            oh.Position.X-r.Position.X, 0,
+                            oh.Position.Z-r.Position.Z)
+                        h:MoveTo(oh.Position + d.Unit * 8)
+                    end
+                end
+            end
+        else
+            -- Not holding: stop moving, look natural
+            h:Move(Vector3.new(0,0,0), false)
+        end
+    end
+
+    -- Auto Pass Bomb (manual mode, independent of AFK)
+    if cfg.AutoPassBomb and not cfg.BombTeleport and not cfg.AFK and holding then
         if noFallBV then noFallBV.MaxForce = Vector3.new(0,0,0) end
         local target, dist = nearestPlayer(nil)
         if target and target.Character then
@@ -343,6 +419,9 @@ RunService.Heartbeat:Connect(function(dt)
             end
         end
     end
+
+    -- Bomb Teleport manual (skip if AFK handles it)
+    -- (moved inside AFK block above for AFK mode, kept here for manual use)
 
     -- No Fall
     if cfg.NoFall and noFallBV and r then
@@ -411,6 +490,11 @@ TabBomb:CreateSlider({ Name = "Bomb Speed", Range = {16,40}, Increment = 1, Curr
     Flag = "BombSpeed", Callback = function(v) SPEED_BOMB = v end })
 TabBomb:CreateSlider({ Name = "Idle Speed", Range = {16,30}, Increment = 1, CurrentValue = 20,
     Flag = "IdleSpeed", Callback = function(v) SPEED_IDLE = v end })
+TabBomb:CreateSection("AFK Mode")
+TabBomb:CreateToggle({ Name = "AFK Mode", CurrentValue = false, Flag = "AFK",
+    Callback = function(v) cfg.AFK = v end })
+TabBomb:CreateSlider({ Name = "Teleport at Timer <=", Range = {1,6}, Increment = 1, CurrentValue = 3,
+    Flag = "AFKTeleportThresh", Callback = function(v) AFK_TELEPORT_THRESH = v end })
 
 -- ─── UI: PVP ──────────────────────────────────────────────────────────────────
 TabPVP:CreateToggle({ Name = "No Fall", CurrentValue = false, Flag = "NoFall",
@@ -504,8 +588,11 @@ TabDebug:CreateToggle({ Name = "Continuous Scan (2s)", CurrentValue = false, Fla
                                 table.insert(sk2, e.name:sub(1,7).."["..e.skip.."]")
                             end
                         end
-                        overlayLog(("Y=%.1f aY=%d | OK:%s"):format(
-                            r2.Position.Y, arenaY,
+                        local bTimer, bCarrier = getBombTimer()
+                        local timerStr = bTimer and ("T="..tostring(bTimer)) or "T=?"
+                        local carrierStr = bCarrier and bCarrier.Name:sub(1,8) or "none"
+                        overlayLog(("Y=%.1f aY=%d %s carrier=%s | OK:%s"):format(
+                            r2.Position.Y, arenaY, timerStr, carrierStr,
                             #ok2 > 0 and table.concat(ok2,",") or "none"))
                         if #sk2 > 0 then
                             overlayLog("sk:"..table.concat(sk2,","),
