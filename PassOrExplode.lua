@@ -428,6 +428,22 @@ toggleAutoPunch = Window:Toggle("Auto Punch", false, function(s)
     cfg.AutoPunch = s
     punchTimer    = 0
 end)
+-- ── Ability bypass buttons (AbilityUseEvent confirmed no ownership check) ───
+local function fireAbility(id)
+    local abilityUse = RS:FindFirstChild("Remotes")
+        and RS.Remotes:FindFirstChild("Events")
+        and RS.Remotes.Events:FindFirstChild("AbilityUseEvent")
+    if abilityUse then
+        pcall(function() abilityUse:FireServer(id) end)
+    end
+end
+
+Window:Button("Ability: Faster",    function() fireAbility("Faster")    end)
+Window:Button("Ability: Invisible",  function() fireAbility("Invisible")  end)
+Window:Button("Ability: Radar",     function() fireAbility("Radar")     end)
+Window:Button("Ability: Silent",    function() fireAbility("Silent")    end)
+Window:Button("Ability: Trap",      function() fireAbility("Trap")      end)
+
 -- Ability scanner + AbilityCatalog dump (bug bounty audit)
 Window:Button("Scan Abilities", function()
     local lines = {}
