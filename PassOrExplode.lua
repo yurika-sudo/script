@@ -4,6 +4,86 @@ local RS         = game:GetService("ReplicatedStorage")
 local VIM        = game:GetService("VirtualInputManager")
 local LocalPlayer = Players.LocalPlayer
 
+-- ─── Overlay log (mobile-friendly, replaces F9 console) ──────────────────────
+local overlayGui = Instance.new("ScreenGui")
+overlayGui.Name = "POEDebugOverlay"
+overlayGui.ResetOnSpawn = false
+overlayGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+overlayGui.Parent = LocalPlayer.PlayerGui
+
+local overlayFrame = Instance.new("Frame")
+overlayFrame.Size = UDim2.new(0, 340, 0, 180)
+overlayFrame.Position = UDim2.new(0, 6, 0.35, 0)
+overlayFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+overlayFrame.BackgroundTransparency = 0.3
+overlayFrame.BorderSizePixel = 0
+overlayFrame.Visible = false
+overlayFrame.Parent = overlayGui
+
+local overlayScroll = Instance.new("ScrollingFrame")
+overlayScroll.Size = UDim2.new(1, -4, 1, -4)
+overlayScroll.Position = UDim2.new(0, 2, 0, 2)
+overlayScroll.BackgroundTransparency = 1
+overlayScroll.BorderSizePixel = 0
+overlayScroll.ScrollBarThickness = 4
+overlayScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+overlayScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+overlayScroll.Parent = overlayFrame
+
+local overlayLayout = Instance.new("UIListLayout")
+overlayLayout.SortOrder = Enum.SortOrder.LayoutOrder
+overlayLayout.Padding = UDim.new(0, 1)
+overlayLayout.Parent = overlayScroll
+
+local LOG_MAX = 40
+local logLines = {}
+local logOrder = 0
+
+local function overlayLog(text)
+    logOrder = logOrder + 1
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, 0, 0, 14)
+    lbl.BackgroundTransparency = 1
+    lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+    lbl.TextSize = 11
+    lbl.Font = Enum.Font.Code
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.TextWrapped = false
+    lbl.Text = text
+    lbl.LayoutOrder = logOrder
+    lbl.Parent = overlayScroll
+    table.insert(logLines, lbl)
+    if #logLines > LOG_MAX then
+        logLines[1]:Destroy()
+        table.remove(logLines, 1)
+    end
+    -- Auto-scroll to bottom
+    task.defer(function()
+        overlayScroll.CanvasPosition = Vector2.new(0, math.max(0, overlayScroll.AbsoluteCanvasSize.Y - overlayScroll.AbsoluteSize.Y))
+    end)
+end
+
+local function overlayLogColor(text, color)
+    logOrder = logOrder + 1
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, 0, 0, 14)
+    lbl.BackgroundTransparency = 1
+    lbl.TextColor3 = color or Color3.fromRGB(220, 220, 220)
+    lbl.TextSize = 11
+    lbl.Font = Enum.Font.Code
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.TextWrapped = false
+    lbl.Text = text
+    lbl.LayoutOrder = logOrder
+    lbl.Parent = overlayScroll
+    table.insert(logLines, lbl)
+    if #logLines > LOG_MAX then logLines[1]:Destroy(); table.remove(logLines, 1) end
+    task.defer(function()
+        overlayScroll.CanvasPosition = Vector2.new(0, math.max(0, overlayScroll.AbsoluteCanvasSize.Y - overlayScroll.AbsoluteSize.Y))
+    end)
+end
+
+-- ─── Rayfield ─────────────────────────────────────────────────────────────────
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 local Window = Rayfield:CreateWindow({
     Name             = "POE Assist [DEBUG]",
@@ -18,6 +98,7 @@ local TabBomb  = Window:CreateTab("Bomb",  4483362458)
 local TabPVP   = Window:CreateTab("PVP",   4483362458)
 local TabDebug = Window:CreateTab("Debug", 4483362458)
 
+-- ─── Config ───────────────────────────────────────────────────────────────────
 local cfg = {
     AutoPassBomb = false,
     BombTeleport = false,
@@ -27,20 +108,18 @@ local cfg = {
     AutoPunch    = false,
 }
 
-local SPEED_BOMB      = 22
-local SPEED_IDLE      = 20
-local SPEED_DEFAULT   = 16
-local MAX_TARGET_DIST = 200
-local MAX_Y_DIFF      = 15
-local PUNCH_Y_DIFF    = 8
-local PUNCH_DIST_MAX  = 60   -- raised from 15 so chase actually kicks in
-local STOP_DIST       = 4
-local PUNCH_RANGE     = 6
-local PUNCH_RATE      = 0.45
--- Arena Y reference from previous session: ~24
--- Players with Y > ARENA_Y + SPECTATOR_Y_MARGIN are treated as spectators
-local ARENA_Y_REF     = 24
-local SPECTATOR_MARGIN = 12  -- tune this after seeing debug output
+local SPEED_BOMB       = 22
+local SPEED_IDLE       = 20
+local SPEED_DEFAULT    = 16
+local MAX_TARGET_DIST  = 200
+local MAX_Y_DIFF       = 15
+local PUNCH_Y_DIFF     = 8
+local PUNCH_DIST_MAX   = 60
+local STOP_DIST        = 4
+local PUNCH_RANGE      = 6
+local PUNCH_RATE       = 0.45
+local ARENA_Y_REF      = 24
+local SPECTATOR_MARGIN = 12
 
 local punchTimer    = 0
 local teleportTimer = 0
@@ -48,8 +127,9 @@ local noclipTimer   = 0
 local noFallBV      = nil
 local ghostActive   = false
 
-local remoteAction   = nil
-local remoteEndgame  = nil
+-- ─── Remotes ──────────────────────────────────────────────────────────────────
+local remoteAction  = nil
+local remoteEndgame = nil
 task.spawn(function()
     local events = RS:WaitForChild("Remotes", 10)
         and RS.Remotes:WaitForChild("Events", 10)
@@ -58,6 +138,7 @@ task.spawn(function()
     remoteEndgame = events:WaitForChild("EndgameAttackEvent", 10)
 end)
 
+-- ─── Helpers ──────────────────────────────────────────────────────────────────
 local function getChar() return LocalPlayer.Character end
 local function getHum(c) return c and c:FindFirstChildOfClass("Humanoid") end
 local function getHRP(c) return c and c:FindFirstChild("HumanoidRootPart") end
@@ -73,104 +154,78 @@ local function hasBomb(c)
     return ok and val == true
 end
 
--- ─── Player filter: returns reason string if skip, nil if ok ─────────────────
+-- ─── Player filter ────────────────────────────────────────────────────────────
 local function shouldSkip(p, myHRP)
     local c = p.Character
     if not c then return "no_character" end
-    local oh = getHRP(c)
-    if not oh then return "no_hrp" end
-    local ph = getHum(c)
-    if not ph then return "no_humanoid" end
-
-    -- Health check
+    local oh = getHRP(c); if not oh then return "no_hrp" end
+    local ph = getHum(c); if not ph then return "no_humanoid" end
     if ph.Health <= 0 then return "health_zero" end
-
-    -- Humanoid state check (catches dead/ragdoll cheaters better than health alone)
     local state = ph:GetState()
     if state == Enum.HumanoidStateType.Dead then return "state_dead" end
-
-    -- Y absolute: if way above arena Y ref, likely spectator platform
     local yAbs = oh.Position.Y
     if yAbs > (ARENA_Y_REF + SPECTATOR_MARGIN) then
         return ("y_too_high(%.1f)"):format(yAbs)
     end
-
-    -- Y diff relative to us
-    local myY = myHRP.Position.Y
-    local yDiff = math.abs(myY - yAbs)
+    local yDiff = math.abs(myHRP.Position.Y - yAbs)
     if yDiff > MAX_Y_DIFF then
-        return ("y_diff_too_big(%.1f)"):format(yDiff)
+        return ("y_diff(%.1f)"):format(yDiff)
     end
-
-    -- Distance
     local dist = (myHRP.Position - oh.Position).Magnitude
-    if dist > MAX_TARGET_DIST then return ("too_far(%.1f)"):format(dist) end
-
-    return nil  -- passed all filters
+    if dist > MAX_TARGET_DIST then return ("too_far(%.0f)"):format(dist) end
+    return nil
 end
 
--- nearestPlayer: returns (player, dist) or (nil, math.huge)
--- debugMode = true → also returns full scan table
 local function nearestPlayer(yDiffLimit, debugMode)
     local c = getChar(); local h = getHRP(c)
     if not h then
         if debugMode then return nil, math.huge, {} end
         return nil, math.huge
     end
-
     local best, bestDist = nil, math.huge
     local scanLog = {}
-
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer then
             local skipReason = shouldSkip(p, h)
-
-            -- Additional punch-specific Y diff filter
             local oh = p.Character and getHRP(p.Character)
             if not skipReason and yDiffLimit and oh then
-                local yDiff = math.abs(h.Position.Y - oh.Position.Y)
-                if yDiff > yDiffLimit then
-                    skipReason = ("punch_ydiff(%.1f>%d)"):format(yDiff, yDiffLimit)
+                local yd = math.abs(h.Position.Y - oh.Position.Y)
+                if yd > yDiffLimit then
+                    skipReason = ("punch_yd(%.1f)"):format(yd)
                 end
             end
-
-            local dist = math.huge
-            if oh then dist = (h.Position - oh.Position).Magnitude end
-
+            local dist = oh and (h.Position - oh.Position).Magnitude or math.huge
             if debugMode then
-                local ph = p.Character and getHum(p.Character)
+                local ph2 = p.Character and getHum(p.Character)
                 local yAbs = oh and oh.Position.Y or -999
                 table.insert(scanLog, {
                     name   = p.Name,
                     dist   = dist,
-                    health = ph and ph.Health or -1,
-                    state  = ph and tostring(ph:GetState()) or "?",
+                    health = ph2 and ph2.Health or -1,
+                    state  = ph2 and tostring(ph2:GetState()) or "?",
                     yAbs   = yAbs,
                     yDiff  = oh and math.abs(h.Position.Y - yAbs) or -1,
-                    skip   = skipReason or "OK_candidate",
+                    skip   = skipReason or "OK",
                 })
             end
-
-            if not skipReason then
-                if dist < bestDist then
-                    bestDist = dist; best = p
-                end
+            if not skipReason and dist < bestDist then
+                bestDist = dist; best = p
             end
         end
     end
-
     if debugMode then return best, bestDist, scanLog end
     return best, bestDist
 end
 
+-- ─── Noclip / NoFall ──────────────────────────────────────────────────────────
 local LEG_NAMES = {"LeftFoot","RightFoot","LeftLowerLeg","RightLowerLeg","LeftUpperLeg","RightUpperLeg","Left Leg","Right Leg"}
 local function isLeg(n) for _,v in ipairs(LEG_NAMES) do if n==v then return true end end return false end
 
 local function applyNoclip(c, on)
     for _, p in ipairs(c:GetDescendants()) do
         if p:IsA("BasePart") and not isLeg(p.Name) then
-            if on and p.CanCollide then p.CanCollide = false end
-            if not on and not p.CanCollide then p.CanCollide = true end
+            if on then p.CanCollide = false
+            else p.CanCollide = true end
         end
     end
     ghostActive = on
@@ -185,6 +240,36 @@ local function setupNoFall(enable)
     bv.MaxForce = Vector3.new(0,0,0); bv.Parent = r; noFallBV = bv
 end
 
+-- ─── Remotes: scan helper ─────────────────────────────────────────────────────
+local COIN_KEYWORDS = {"coin","currency","score","reward","money","cash","gold","point","earn","collect"}
+local function matchesCoinKeyword(name)
+    local lower = name:lower()
+    for _, kw in ipairs(COIN_KEYWORDS) do
+        if lower:find(kw, 1, true) then return true end
+    end
+    return false
+end
+
+local function scanRemotesDeep(root, results, depth)
+    depth = depth or 0
+    if depth > 5 then return end
+    for _, child in ipairs(root:GetChildren()) do
+        if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
+            table.insert(results, {
+                name  = child.Name,
+                class = child.ClassName,
+                path  = child:GetFullName(),
+                coin  = matchesCoinKeyword(child.Name),
+                ref   = child,
+            })
+        end
+        if #child:GetChildren() > 0 then
+            scanRemotesDeep(child, results, depth + 1)
+        end
+    end
+end
+
+-- ─── firePunch ────────────────────────────────────────────────────────────────
 local function firePunch(targetChar, targetHRP)
     if remoteAction then
         pcall(function() remoteAction:FireServer("Punch") end)
@@ -215,9 +300,7 @@ RunService.Heartbeat:Connect(function(dt)
     local chasing = holding and (cfg.AutoPassBomb or cfg.BombTeleport)
 
     local targetSpd = SPEED_DEFAULT
-    if cfg.SpeedEnabled then
-        targetSpd = chasing and SPEED_BOMB or SPEED_IDLE
-    end
+    if cfg.SpeedEnabled then targetSpd = chasing and SPEED_BOMB or SPEED_IDLE end
     if h.WalkSpeed ~= targetSpd then h.WalkSpeed = targetSpd end
 
     if cfg.Noclip then
@@ -271,17 +354,9 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- Auto Punch (no knockback — client-side only, removed)
     if cfg.AutoPunch then
         local myY = r.Position.Y
-
-        -- Safety: if we got knocked far from arena Y, stop movement and wait
-        local yFromArena = math.abs(myY - ARENA_Y_REF)
-        if yFromArena > 20 then
-            -- We're probably mid-air from knockback, don't chase
-            return
-        end
-
+        if math.abs(myY - ARENA_Y_REF) > 20 then return end
         local target, dist = nearestPlayer(PUNCH_Y_DIFF)
         if target and target.Character then
             local oh = getHRP(target.Character)
@@ -297,7 +372,6 @@ RunService.Heartbeat:Connect(function(dt)
                 end
             end
         else
-            -- No valid target: stop any pending movement to avoid frozen state
             h:MoveTo(r.Position)
             punchTimer = 0
         end
@@ -316,9 +390,9 @@ end)
 -- ─── UI: Bomb tab ─────────────────────────────────────────────────────────────
 TabBomb:CreateToggle({ Name = "Auto Pass Bomb", CurrentValue = false, Flag = "AutoPassBomb",
     Callback = function(v) cfg.AutoPassBomb = v end })
-TabBomb:CreateToggle({ Name = "Bomb Teleport",  CurrentValue = false, Flag = "BombTeleport",
+TabBomb:CreateToggle({ Name = "Bomb Teleport", CurrentValue = false, Flag = "BombTeleport",
     Callback = function(v) cfg.BombTeleport = v end })
-TabBomb:CreateToggle({ Name = "Ghost Mode",     CurrentValue = false, Flag = "Noclip",
+TabBomb:CreateToggle({ Name = "Ghost Mode", CurrentValue = false, Flag = "Noclip",
     Callback = function(v)
         cfg.Noclip = v
         if not v and ghostActive then local c=getChar(); if c then applyNoclip(c,false) end end
@@ -343,90 +417,81 @@ TabPVP:CreateSlider({ Name = "Arena Y Reference", Range = {0,60}, Increment = 1,
     Callback = function(v) ARENA_Y_REF = v end })
 
 -- ─── UI: Debug tab ────────────────────────────────────────────────────────────
+TabDebug:CreateSection("Overlay")
+
+TabDebug:CreateToggle({ Name = "Show Log Overlay", CurrentValue = false, Flag = "ShowOverlay",
+    Callback = function(v)
+        overlayFrame.Visible = v
+    end })
+
+TabDebug:CreateButton({ Name = "Clear Overlay", Callback = function()
+    for _, lbl in ipairs(logLines) do lbl:Destroy() end
+    logLines = {}
+end })
+
 TabDebug:CreateSection("Player Scanner")
 
--- Dumps a full scan to console + shows summary in notify
-TabDebug:CreateButton({ Name = "Dump Player Scan (F9 console)", Callback = function()
+TabDebug:CreateButton({ Name = "Full Player Scan", Callback = function()
     local c = getChar(); local r = getHRP(c)
     if not r then
         Rayfield:Notify({ Title="Debug", Content="No character", Duration=4 })
         return
     end
-
     local _, _, scanLog = nearestPlayer(PUNCH_Y_DIFF, true)
-
-    print("===== POE DEBUG SCAN =====")
-    print(("Self: Y=%.2f  ArenaYRef=%d  SpectatorMargin=%d"):format(
-        r.Position.Y, ARENA_Y_REF, SPECTATOR_MARGIN))
-    print(("-"):rep(40))
-
     local okCount, skipCount = 0, 0
-    for _, entry in ipairs(scanLog) do
-        local passed = entry.skip == "OK_candidate"
+    overlayLog(("=SCAN SelfY=%.1f ArenaRef=%d"):format(r.Position.Y, ARENA_Y_REF))
+    for _, e in ipairs(scanLog) do
+        local passed = e.skip == "OK"
         if passed then okCount = okCount + 1 else skipCount = skipCount + 1 end
-        print(("[%s] %s | dist=%.1f | hp=%.0f | state=%s | Y=%.2f | Ydiff=%.2f | reason=%s"):format(
-            passed and "OK  " or "SKIP",
-            entry.name,
-            entry.dist,
-            entry.health,
-            entry.state,
-            entry.yAbs,
-            entry.yDiff,
-            entry.skip
-        ))
+        local line = ("[%s] %s d=%.0f hp=%.0f Y=%.1f %s"):format(
+            passed and "OK" or "SK",
+            e.name:sub(1,12),
+            e.dist, e.health, e.yAbs, passed and "" or ("("..e.skip..")")
+        )
+        overlayLogColor(line, passed and Color3.fromRGB(100,255,100) or Color3.fromRGB(255,120,80))
     end
-    print(("Total: %d players | %d OK | %d skipped"):format(#scanLog, okCount, skipCount))
-    print("==========================")
-
+    overlayLog(("OK=%d Skip=%d"):format(okCount, skipCount))
+    overlayFrame.Visible = true
     Rayfield:Notify({
         Title   = ("Scan: %d players"):format(#scanLog),
-        Content = ("OK=%d  Skipped=%d\nSelf Y=%.1f\nSee F9 console for full log"):format(
-            okCount, skipCount, r.Position.Y),
-        Duration = 8
+        Content = ("OK=%d  Skip=%d\nSelfY=%.1f\nSee overlay (left side)"):format(okCount, skipCount, r.Position.Y),
+        Duration = 6
     })
 end })
 
--- Quick self-info: print current Y and nearest target info
-TabDebug:CreateButton({ Name = "Quick: Self Y + Nearest Target", Callback = function()
+TabDebug:CreateButton({ Name = "Quick: Self + Target", Callback = function()
     local c = getChar(); local r = getHRP(c)
     if not r then return end
-
-    local myY = r.Position.Y
     local target, dist, scanLog = nearestPlayer(PUNCH_Y_DIFF, true)
-
     local lines = {}
-    table.insert(lines, ("Self Y = %.2f"):format(myY))
-
+    table.insert(lines, ("SelfY=%.2f"):format(r.Position.Y))
     if target then
         local oh = getHRP(target.Character)
-        table.insert(lines, ("Target: %s"):format(target.Name))
+        table.insert(lines, ("Target:%s"):format(target.Name))
         table.insert(lines, ("Dist=%.1f Y=%.2f"):format(dist, oh and oh.Position.Y or -1))
     else
-        table.insert(lines, "No valid target found")
+        table.insert(lines, "No target")
     end
-
-    -- Show skipped count and top skip reason
-    local skipReasons = {}
+    local skipParts = {}
     for _, e in ipairs(scanLog) do
-        if e.skip ~= "OK_candidate" then
-            skipReasons[#skipReasons+1] = e.name .. "→" .. e.skip
+        if e.skip ~= "OK" then
+            table.insert(skipParts, e.name:sub(1,8)..">"..e.skip)
         end
     end
-    if #skipReasons > 0 then
-        table.insert(lines, "Skipped: " .. table.concat(skipReasons, " | "))
+    if #skipParts > 0 then
+        table.insert(lines, "Skip:")
+        for _, s in ipairs(skipParts) do table.insert(lines, "  "..s) end
     end
-
-    local msg = table.concat(lines, "\n")
-    print("[POE Quick Scan] " .. msg)
-    Rayfield:Notify({ Title="Quick Scan", Content=msg, Duration=10 })
+    overlayFrame.Visible = true
+    for _, l in ipairs(lines) do overlayLog(l) end
+    Rayfield:Notify({ Title="Quick Scan", Content=table.concat(lines,"\n"), Duration=8 })
 end })
 
--- Continuous scan: prints to console every 2s while enabled
 local continuousActive = false
-TabDebug:CreateToggle({ Name = "Continuous Scan (console, 2s)", CurrentValue = false,
-    Flag = "ContinuousScan",
+TabDebug:CreateToggle({ Name = "Continuous Scan (2s)", CurrentValue = false, Flag = "ContinuousScan",
     Callback = function(v)
         continuousActive = v
+        overlayFrame.Visible = v
         if v then
             task.spawn(function()
                 while continuousActive do
@@ -435,17 +500,17 @@ TabDebug:CreateToggle({ Name = "Continuous Scan (console, 2s)", CurrentValue = f
                         local target, dist, scanLog = nearestPlayer(PUNCH_Y_DIFF, true)
                         local okList, skipList = {}, {}
                         for _, e in ipairs(scanLog) do
-                            if e.skip == "OK_candidate" then
-                                table.insert(okList, ("%s(%.1f)"):format(e.name, e.dist))
+                            if e.skip == "OK" then
+                                table.insert(okList, e.name:sub(1,8).."("..math.floor(e.dist)..")")
                             else
-                                table.insert(skipList, ("%s[%s]"):format(e.name, e.skip))
+                                table.insert(skipList, e.name:sub(1,8).."["..e.skip.."]")
                             end
                         end
-                        print(("[SCAN] SelfY=%.1f | OK: %s | Skip: %s"):format(
-                            r2.Position.Y,
-                            #okList > 0 and table.concat(okList,",") or "none",
-                            #skipList > 0 and table.concat(skipList,",") or "none"
-                        ))
+                        local selfY = r2.Position.Y
+                        overlayLog(("Y=%.1f OK:%s"):format(selfY, #okList>0 and table.concat(okList,",") or "none"))
+                        if #skipList > 0 then
+                            overlayLogColor("Skip:"..table.concat(skipList,","), Color3.fromRGB(255,160,60))
+                        end
                     end
                     task.wait(2)
                 end
@@ -454,13 +519,91 @@ TabDebug:CreateToggle({ Name = "Continuous Scan (console, 2s)", CurrentValue = f
     end
 })
 
+TabDebug:CreateSection("Coin / Remote Scanner")
+
+TabDebug:CreateButton({ Name = "Scan Coin Remotes", Callback = function()
+    local results = {}
+    scanRemotesDeep(RS, results)
+    -- Also scan workspace for any events there
+    scanRemotesDeep(workspace, results)
+
+    local coinHits = {}
+    local allCount = 0
+    for _, r in ipairs(results) do
+        allCount = allCount + 1
+        if r.coin then table.insert(coinHits, r) end
+    end
+
+    overlayFrame.Visible = true
+    overlayLog(("=REMOTE SCAN total=%d coin=%d"):format(allCount, #coinHits))
+
+    if #coinHits == 0 then
+        overlayLog("No coin-keyword remotes found")
+        overlayLog("Showing ALL remotes:")
+        for _, r2 in ipairs(results) do
+            overlayLog(("  [%s] %s"):format(r2.class:sub(1,2), r2.path))
+        end
+    else
+        for _, r2 in ipairs(coinHits) do
+            overlayLogColor(("[COIN] %s"):format(r2.path), Color3.fromRGB(255,215,0))
+        end
+        overlayLog("--- All remotes ---")
+        for _, r2 in ipairs(results) do
+            overlayLog(("  [%s] %s"):format(r2.class:sub(1,2), r2.path))
+        end
+    end
+
+    local summary = ("%d remotes found\n%d match coin keywords\nCheck overlay"):format(allCount, #coinHits)
+    Rayfield:Notify({ Title="Remote Scan", Content=summary, Duration=8 })
+end })
+
+-- Fire a coin remote by name with a test value
+-- Usage: type remote name in slider (workaround: buttons for common patterns)
+TabDebug:CreateButton({ Name = "Try Fire: AddCoins +999", Callback = function()
+    local results = {}
+    scanRemotesDeep(RS, results)
+    scanRemotesDeep(workspace, results)
+
+    local fired = 0
+    for _, r2 in ipairs(results) do
+        if r2.coin and r2.class == "RemoteEvent" then
+            -- Try several payload patterns
+            pcall(function() r2.ref:FireServer(999) end)
+            pcall(function() r2.ref:FireServer("add", 999) end)
+            pcall(function() r2.ref:FireServer({amount=999}) end)
+            fired = fired + 1
+            overlayLogColor(("FIRED: %s"):format(r2.name), Color3.fromRGB(255,215,0))
+        end
+    end
+    overlayFrame.Visible = true
+    Rayfield:Notify({
+        Title   = "Fire Attempt",
+        Content = ("Fired %d coin remote(s)\nCheck if balance changed"):format(fired),
+        Duration = 6
+    })
+end })
+
+TabDebug:CreateButton({ Name = "Try Fire: ActionEvent Coins", Callback = function()
+    -- Try common action strings that might add coins
+    local actions = {"AddCoins","addCoins","earn","collect","reward","GiveCoins","giveCoins","coin"}
+    if remoteAction then
+        for _, a in ipairs(actions) do
+            pcall(function() remoteAction:FireServer(a) end)
+            pcall(function() remoteAction:FireServer(a, 999) end)
+        end
+        overlayFrame.Visible = true
+        overlayLog("Fired ActionEvent with coin strings")
+        overlayLog("Check balance change")
+        Rayfield:Notify({ Title="ActionEvent Fire", Content="Tried coin strings\nCheck if balance changed", Duration=6 })
+    else
+        Rayfield:Notify({ Title="ActionEvent", Content="remoteAction not loaded yet", Duration=4 })
+    end
+end })
+
 TabDebug:CreateSection("Thresholds (live-tune)")
 TabDebug:CreateSlider({ Name = "Punch Y Diff", Range = {3,25}, Increment = 1, CurrentValue = 8,
-    Flag = "PunchYDiff",
-    Callback = function(v) PUNCH_Y_DIFF = v end })
+    Flag = "PunchYDiff", Callback = function(v) PUNCH_Y_DIFF = v end })
 TabDebug:CreateSlider({ Name = "Max Target Dist", Range = {20,300}, Increment = 5, CurrentValue = 200,
-    Flag = "MaxTargetDist",
-    Callback = function(v) MAX_TARGET_DIST = v end })
+    Flag = "MaxTargetDist", Callback = function(v) MAX_TARGET_DIST = v end })
 TabDebug:CreateSlider({ Name = "Punch Dist Max", Range = {10,100}, Increment = 5, CurrentValue = 60,
-    Flag = "PunchDistMax",
-    Callback = function(v) PUNCH_DIST_MAX = v end })
+    Flag = "PunchDistMax", Callback = function(v) PUNCH_DIST_MAX = v end })
