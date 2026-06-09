@@ -21,7 +21,7 @@ local cfg = {
 }
 
 -- ── Tunable constants ─────────────────────────────────────────────────────────
-local SPEED_BOMB    = 22   -- walkspeed while chasing to pass bomb
+local SPEED_BOMB    = 22   -- walkspeed while chasing to pass bomb (default preset)
 local SPEED_IDLE    = 20   -- walkspeed when speed boost on but not chasing
 local SPEED_DEFAULT = 16   -- game default
 
@@ -347,6 +347,26 @@ Window:Toggle("Ghost Mode",     false, function(s)
     end
 end)
 Window:Toggle("Speed Boost",    false, function(s) cfg.SpeedEnabled = s end)
+
+-- Speed presets — only affect SPEED_BOMB (chase speed while holding bomb).
+-- SPEED_IDLE stays at 20 regardless of preset.
+-- 22 = safe default | 24 = subtle boost | 26 = matches in-game P2W speed ability
+Window:Button("Speed 22 (safe)", function()
+    SPEED_BOMB = 22
+    local c = getChar(); local h = getHum(c)
+    if h then h.WalkSpeed = cfg.SpeedEnabled and SPEED_BOMB or SPEED_DEFAULT end
+end)
+Window:Button("Speed 24 (boost)", function()
+    SPEED_BOMB = 24
+    local c = getChar(); local h = getHum(c)
+    if h then h.WalkSpeed = cfg.SpeedEnabled and SPEED_BOMB or SPEED_DEFAULT end
+end)
+Window:Button("Speed 26 (match P2W)", function()
+    SPEED_BOMB = 26
+    local c = getChar(); local h = getHum(c)
+    if h then h.WalkSpeed = cfg.SpeedEnabled and SPEED_BOMB or SPEED_DEFAULT end
+end)
+
 Window:Toggle("No Fall",        false, function(s) cfg.NoFall = s; setupNoFall(s) end)
 Window:Toggle("Free Fly",       false, function(s)
     cfg.FreeFly = s
