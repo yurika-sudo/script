@@ -4,64 +4,58 @@ local RS         = game:GetService("ReplicatedStorage")
 local VIM        = game:GetService("VirtualInputManager")
 local LocalPlayer = Players.LocalPlayer
 
--- Rayfield: tabs, clean layout
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 local Window = Rayfield:CreateWindow({
-    Name             = "POE Assist",
+    Name             = "POE Assist [DEBUG]",
     LoadingTitle     = "POE Assist",
-    LoadingSubtitle  = "",
+    LoadingSubtitle  = "debug build",
     ConfigurationSaving = { Enabled = false },
     Discord          = { Enabled = false },
     KeySystem        = false,
 })
 
-local TabBomb     = Window:CreateTab("Bomb",     4483362458)
-local TabPVP      = Window:CreateTab("PVP",      4483362458)
-local TabAbility  = Window:CreateTab("Abilities",4483362458)
+local TabBomb  = Window:CreateTab("Bomb",  4483362458)
+local TabPVP   = Window:CreateTab("PVP",   4483362458)
+local TabDebug = Window:CreateTab("Debug", 4483362458)
 
--- Config
 local cfg = {
     AutoPassBomb = false,
     BombTeleport = false,
     Noclip       = false,
     SpeedEnabled = false,
     NoFall       = false,
-    FreeFly      = false,
     AutoPunch    = false,
 }
 
-local SPEED_BOMB    = 22
-local SPEED_IDLE    = 20
-local SPEED_DEFAULT = 16
+local SPEED_BOMB      = 22
+local SPEED_IDLE      = 20
+local SPEED_DEFAULT   = 16
 local MAX_TARGET_DIST = 200
 local MAX_Y_DIFF      = 15
 local PUNCH_Y_DIFF    = 8
-local PUNCH_DIST_MAX  = 15
-local LOBBY_Y_THRESH  = 10
+local PUNCH_DIST_MAX  = 60   -- raised from 15 so chase actually kicks in
 local STOP_DIST       = 4
 local PUNCH_RANGE     = 6
 local PUNCH_RATE      = 0.45
-local FLY_SPEED       = 40
+-- Arena Y reference from previous session: ~24
+-- Players with Y > ARENA_Y + SPECTATOR_Y_MARGIN are treated as spectators
+local ARENA_Y_REF     = 24
+local SPECTATOR_MARGIN = 12  -- tune this after seeing debug output
 
 local punchTimer    = 0
 local teleportTimer = 0
 local noclipTimer   = 0
 local noFallBV      = nil
-local punchNoFallBV = nil
-local freeFlyBV     = nil
 local ghostActive   = false
 
--- Remotes at correct path
 local remoteAction   = nil
 local remoteEndgame  = nil
-local remoteAbility  = nil
 task.spawn(function()
     local events = RS:WaitForChild("Remotes", 10)
         and RS.Remotes:WaitForChild("Events", 10)
     if not events then return end
-    remoteAction  = events:WaitForChild("ActionEvent",       10)
+    remoteAction  = events:WaitForChild("ActionEvent",        10)
     remoteEndgame = events:WaitForChild("EndgameAttackEvent", 10)
-    remoteAbility = events:FindFirstChild("AbilityUseEvent")
 end)
 
 local function getChar() return LocalPlayer.Character end
@@ -79,24 +73,93 @@ local function hasBomb(c)
     return ok and val == true
 end
 
-local function nearestPlayer(yDiffLimit)
+-- ─── Player filter: returns reason string if skip, nil if ok ─────────────────
+local function shouldSkip(p, myHRP)
+    local c = p.Character
+    if not c then return "no_character" end
+    local oh = getHRP(c)
+    if not oh then return "no_hrp" end
+    local ph = getHum(c)
+    if not ph then return "no_humanoid" end
+
+    -- Health check
+    if ph.Health <= 0 then return "health_zero" end
+
+    -- Humanoid state check (catches dead/ragdoll cheaters better than health alone)
+    local state = ph:GetState()
+    if state == Enum.HumanoidStateType.Dead then return "state_dead" end
+
+    -- Y absolute: if way above arena Y ref, likely spectator platform
+    local yAbs = oh.Position.Y
+    if yAbs > (ARENA_Y_REF + SPECTATOR_MARGIN) then
+        return ("y_too_high(%.1f)"):format(yAbs)
+    end
+
+    -- Y diff relative to us
+    local myY = myHRP.Position.Y
+    local yDiff = math.abs(myY - yAbs)
+    if yDiff > MAX_Y_DIFF then
+        return ("y_diff_too_big(%.1f)"):format(yDiff)
+    end
+
+    -- Distance
+    local dist = (myHRP.Position - oh.Position).Magnitude
+    if dist > MAX_TARGET_DIST then return ("too_far(%.1f)"):format(dist) end
+
+    return nil  -- passed all filters
+end
+
+-- nearestPlayer: returns (player, dist) or (nil, math.huge)
+-- debugMode = true → also returns full scan table
+local function nearestPlayer(yDiffLimit, debugMode)
     local c = getChar(); local h = getHRP(c)
-    if not h then return nil, math.huge end
+    if not h then
+        if debugMode then return nil, math.huge, {} end
+        return nil, math.huge
+    end
+
     local best, bestDist = nil, math.huge
+    local scanLog = {}
+
     for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p.Character then
-            local oh = getHRP(p.Character)
-            local ph = getHum(p.Character)
-            if oh and ph and ph.Health > 0 then
-                local d     = (h.Position - oh.Position).Magnitude
+        if p ~= LocalPlayer then
+            local skipReason = shouldSkip(p, h)
+
+            -- Additional punch-specific Y diff filter
+            local oh = p.Character and getHRP(p.Character)
+            if not skipReason and yDiffLimit and oh then
                 local yDiff = math.abs(h.Position.Y - oh.Position.Y)
-                local ok    = (not yDiffLimit) or (yDiff <= yDiffLimit)
-                if d < bestDist and d <= MAX_TARGET_DIST and ok then
-                    bestDist = d; best = p
+                if yDiff > yDiffLimit then
+                    skipReason = ("punch_ydiff(%.1f>%d)"):format(yDiff, yDiffLimit)
+                end
+            end
+
+            local dist = math.huge
+            if oh then dist = (h.Position - oh.Position).Magnitude end
+
+            if debugMode then
+                local ph = p.Character and getHum(p.Character)
+                local yAbs = oh and oh.Position.Y or -999
+                table.insert(scanLog, {
+                    name   = p.Name,
+                    dist   = dist,
+                    health = ph and ph.Health or -1,
+                    state  = ph and tostring(ph:GetState()) or "?",
+                    yAbs   = yAbs,
+                    yDiff  = oh and math.abs(h.Position.Y - yAbs) or -1,
+                    skip   = skipReason or "OK_candidate",
+                })
+            end
+
+            if not skipReason then
+                if dist < bestDist then
+                    bestDist = dist; best = p
                 end
             end
         end
     end
+
+    if debugMode then return best, bestDist, scanLog end
     return best, bestDist
 end
 
@@ -122,15 +185,6 @@ local function setupNoFall(enable)
     bv.MaxForce = Vector3.new(0,0,0); bv.Parent = r; noFallBV = bv
 end
 
-local function setupFreeFly(enable)
-    if freeFlyBV then pcall(function() freeFlyBV:Destroy() end); freeFlyBV = nil end
-    if not enable then return end
-    local r = getHRP(getChar()); if not r then return end
-    local bv = Instance.new("BodyVelocity")
-    bv.Name = "FreeFlyBV"; bv.MaxForce = Vector3.new(1e6,1e6,1e6)
-    bv.Velocity = Vector3.new(0,0,0); bv.Parent = r; freeFlyBV = bv
-end
-
 local function firePunch(targetChar, targetHRP)
     if remoteAction then
         pcall(function() remoteAction:FireServer("Punch") end)
@@ -151,20 +205,7 @@ local function firePunch(targetChar, targetHRP)
     end)
 end
 
-local function fireAbility(id)
-    if remoteAbility then
-        pcall(function() remoteAbility:FireServer(id) end)
-    else
-        -- Fallback: find it on the fly
-        local events = RS:FindFirstChild("Remotes") and RS.Remotes:FindFirstChild("Events")
-        if events then
-            local e = events:FindFirstChild("AbilityUseEvent")
-            if e then pcall(function() e:FireServer(id) end) end
-        end
-    end
-end
-
--- Main loop
+-- ─── Main loop ────────────────────────────────────────────────────────────────
 RunService.Heartbeat:Connect(function(dt)
     local c = getChar(); local h = getHum(c)
     if not h or h.Health <= 0 then return end
@@ -179,7 +220,6 @@ RunService.Heartbeat:Connect(function(dt)
     end
     if h.WalkSpeed ~= targetSpd then h.WalkSpeed = targetSpd end
 
-    -- Ghost re-apply every 0.3s
     if cfg.Noclip then
         noclipTimer = noclipTimer + dt
         if noclipTimer >= 0.3 then noclipTimer = 0; applyNoclip(c, true) end
@@ -187,7 +227,6 @@ RunService.Heartbeat:Connect(function(dt)
         applyNoclip(c, false); noclipTimer = 0
     end
 
-    -- Bomb Teleport: face target, safety rollback if fell off
     if cfg.BombTeleport and holding then
         teleportTimer = teleportTimer + dt
         if teleportTimer >= 0.25 then
@@ -210,7 +249,6 @@ RunService.Heartbeat:Connect(function(dt)
         teleportTimer = 0
     end
 
-    -- Auto Pass Bomb
     if cfg.AutoPassBomb and not cfg.BombTeleport and holding then
         if noFallBV then noFallBV.MaxForce = Vector3.new(0,0,0) end
         local target, dist = nearestPlayer(nil)
@@ -223,8 +261,7 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- No Fall
-    if cfg.NoFall and noFallBV and r and not cfg.FreeFly and not chasing then
+    if cfg.NoFall and noFallBV and r then
         local vel = r.AssemblyLinearVelocity
         if vel.Y < 0 then
             noFallBV.MaxForce = Vector3.new(0, 1e6, 0)
@@ -234,65 +271,49 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- Free Fly
-    if cfg.FreeFly and freeFlyBV then
-        if chasing then
-            freeFlyBV.MaxForce = Vector3.new(0,0,0)
-        else
-            freeFlyBV.MaxForce = Vector3.new(1e6,1e6,1e6)
-            local moveDir = h.MoveDirection
-            local pitchY  = workspace.CurrentCamera.CFrame.LookVector.Y
-            freeFlyBV.Velocity = moveDir.Magnitude > 0
-                and Vector3.new(moveDir.X*FLY_SPEED, pitchY*FLY_SPEED, moveDir.Z*FLY_SPEED)
-                or  Vector3.new(0,0,0)
-        end
-    end
-
-    -- Auto Punch: chase target → stop at PUNCH_RANGE → punch + knockback
+    -- Auto Punch (no knockback — client-side only, removed)
     if cfg.AutoPunch then
+        local myY = r.Position.Y
+
+        -- Safety: if we got knocked far from arena Y, stop movement and wait
+        local yFromArena = math.abs(myY - ARENA_Y_REF)
+        if yFromArena > 20 then
+            -- We're probably mid-air from knockback, don't chase
+            return
+        end
+
         local target, dist = nearestPlayer(PUNCH_Y_DIFF)
-        if target and target.Character and dist <= PUNCH_DIST_MAX then
+        if target and target.Character then
             local oh = getHRP(target.Character)
             if oh then
                 if dist > PUNCH_RANGE then
-                    -- Chase: walk toward target, stop when in punch range
                     h:MoveTo(oh.Position)
                 else
-                    -- In range: fire punch every PUNCH_RATE seconds
                     punchTimer = punchTimer + dt
                     if punchTimer >= PUNCH_RATE then
                         punchTimer = 0
                         firePunch(target.Character, oh)
-                        -- Knockback: launch target away from us (replicated via physics)
-                        pcall(function()
-                            local dir = (oh.Position - r.Position)
-                            local flat = Vector3.new(dir.X, 0, dir.Z)
-                            if flat.Magnitude > 0 then
-                                oh.AssemblyLinearVelocity = Vector3.new(
-                                    flat.Unit.X * 90,
-                                    35,
-                                    flat.Unit.Z * 90
-                                )
-                            end
-                        end)
                     end
                 end
             end
+        else
+            -- No valid target: stop any pending movement to avoid frozen state
+            h:MoveTo(r.Position)
+            punchTimer = 0
         end
     else
-        if punchNoFallBV then pcall(function() punchNoFallBV:Destroy() end); punchNoFallBV = nil end
+        punchTimer = 0
     end
 end)
 
 LocalPlayer.CharacterAdded:Connect(function()
-    noFallBV = nil; punchNoFallBV = nil; freeFlyBV = nil
-    ghostActive = false; noclipTimer = 0; teleportTimer = 0; punchTimer = 0
+    noFallBV = nil; ghostActive = false
+    noclipTimer = 0; teleportTimer = 0; punchTimer = 0
     task.wait(1)
-    if cfg.FreeFly then setupFreeFly(true) end
-    if cfg.NoFall  then setupNoFall(true)  end
+    if cfg.NoFall then setupNoFall(true) end
 end)
 
--- UI: Bomb tab
+-- ─── UI: Bomb tab ─────────────────────────────────────────────────────────────
 TabBomb:CreateToggle({ Name = "Auto Pass Bomb", CurrentValue = false, Flag = "AutoPassBomb",
     Callback = function(v) cfg.AutoPassBomb = v end })
 TabBomb:CreateToggle({ Name = "Bomb Teleport",  CurrentValue = false, Flag = "BombTeleport",
@@ -302,54 +323,144 @@ TabBomb:CreateToggle({ Name = "Ghost Mode",     CurrentValue = false, Flag = "No
         cfg.Noclip = v
         if not v and ghostActive then local c=getChar(); if c then applyNoclip(c,false) end end
     end })
-TabBomb:CreateToggle({ Name = "Speed Boost",    CurrentValue = false, Flag = "SpeedBoost",
+TabBomb:CreateToggle({ Name = "Speed Boost", CurrentValue = false, Flag = "SpeedBoost",
     Callback = function(v) cfg.SpeedEnabled = v end })
-TabBomb:CreateSlider({ Name = "Bomb Speed", Range = {16, 40}, Increment = 1,
-    CurrentValue = 22, Flag = "BombSpeed",
+TabBomb:CreateSlider({ Name = "Bomb Speed", Range = {16,40}, Increment = 1, CurrentValue = 22, Flag = "BombSpeed",
     Callback = function(v) SPEED_BOMB = v end })
-TabBomb:CreateSlider({ Name = "Idle Speed", Range = {16, 30}, Increment = 1,
-    CurrentValue = 20, Flag = "IdleSpeed",
+TabBomb:CreateSlider({ Name = "Idle Speed", Range = {16,30}, Increment = 1, CurrentValue = 20, Flag = "IdleSpeed",
     Callback = function(v) SPEED_IDLE = v end })
 
--- UI: PVP tab
-TabPVP:CreateToggle({ Name = "No Fall",   CurrentValue = false, Flag = "NoFall",
+-- ─── UI: PVP tab ──────────────────────────────────────────────────────────────
+TabPVP:CreateToggle({ Name = "No Fall", CurrentValue = false, Flag = "NoFall",
     Callback = function(v) cfg.NoFall = v; setupNoFall(v) end })
-TabPVP:CreateToggle({ Name = "Free Fly",  CurrentValue = false, Flag = "FreeFly",
-    Callback = function(v)
-        cfg.FreeFly = v; setupFreeFly(v)
-        if not v and cfg.NoFall then setupNoFall(true) end
-    end })
 TabPVP:CreateToggle({ Name = "Auto Punch", CurrentValue = false, Flag = "AutoPunch",
     Callback = function(v) cfg.AutoPunch = v; punchTimer = 0 end })
+TabPVP:CreateSlider({ Name = "Spectator Y Margin", Range = {5,40}, Increment = 1, CurrentValue = 12,
+    Flag = "SpectatorMargin",
+    Callback = function(v) SPECTATOR_MARGIN = v end })
+TabPVP:CreateSlider({ Name = "Arena Y Reference", Range = {0,60}, Increment = 1, CurrentValue = 24,
+    Flag = "ArenaYRef",
+    Callback = function(v) ARENA_Y_REF = v end })
 
--- UI: Abilities tab
-TabAbility:CreateSection("Use Ability")
-TabAbility:CreateButton({ Name = "Runner (default)", Callback = function() fireAbility("Runner") end })
-TabAbility:CreateButton({ Name = "Radar",            Callback = function() fireAbility("Radar")  end })
-TabAbility:CreateButton({ Name = "Trap",             Callback = function() fireAbility("Trap")   end })
-TabAbility:CreateButton({ Name = "Silent",           Callback = function() fireAbility("Silent") end })
-TabAbility:CreateSection("Debug")
-TabAbility:CreateButton({ Name = "Scan All Ability IDs", Callback = function()
-    local catalog = RS:FindFirstChild("Shared") and RS.Shared:FindFirstChild("AbilityCatalog")
-    if not catalog then Rayfield:Notify({ Title="Scan", Content="AbilityCatalog not found", Duration=5 }); return end
-    local ok, data = pcall(require, catalog)
-    if not ok then Rayfield:Notify({ Title="Scan", Content=tostring(data), Duration=5 }); return end
+-- ─── UI: Debug tab ────────────────────────────────────────────────────────────
+TabDebug:CreateSection("Player Scanner")
 
-    local ids = {}
-    if type(data) == "table" then
-        -- Catalog is { Abilities = { [id] = {...}, ... }, DefaultAbility = "Runner" }
-        -- Drill into data.Abilities if it exists, otherwise use data directly
-        local src = (type(data.Abilities) == "table") and data.Abilities or data
-        for k, v in pairs(src) do
-            if type(v) == "table" then
-                table.insert(ids, tostring(k))
-            end
-        end
+-- Dumps a full scan to console + shows summary in notify
+TabDebug:CreateButton({ Name = "Dump Player Scan (F9 console)", Callback = function()
+    local c = getChar(); local r = getHRP(c)
+    if not r then
+        Rayfield:Notify({ Title="Debug", Content="No character", Duration=4 })
+        return
     end
 
+    local _, _, scanLog = nearestPlayer(PUNCH_Y_DIFF, true)
+
+    print("===== POE DEBUG SCAN =====")
+    print(("Self: Y=%.2f  ArenaYRef=%d  SpectatorMargin=%d"):format(
+        r.Position.Y, ARENA_Y_REF, SPECTATOR_MARGIN))
+    print(("-"):rep(40))
+
+    local okCount, skipCount = 0, 0
+    for _, entry in ipairs(scanLog) do
+        local passed = entry.skip == "OK_candidate"
+        if passed then okCount = okCount + 1 else skipCount = skipCount + 1 end
+        print(("[%s] %s | dist=%.1f | hp=%.0f | state=%s | Y=%.2f | Ydiff=%.2f | reason=%s"):format(
+            passed and "OK  " or "SKIP",
+            entry.name,
+            entry.dist,
+            entry.health,
+            entry.state,
+            entry.yAbs,
+            entry.yDiff,
+            entry.skip
+        ))
+    end
+    print(("Total: %d players | %d OK | %d skipped"):format(#scanLog, okCount, skipCount))
+    print("==========================")
+
     Rayfield:Notify({
-        Title    = "Ability IDs (" .. #ids .. ")",
-        Content  = table.concat(ids, ", "),
-        Duration = 20
+        Title   = ("Scan: %d players"):format(#scanLog),
+        Content = ("OK=%d  Skipped=%d\nSelf Y=%.1f\nSee F9 console for full log"):format(
+            okCount, skipCount, r.Position.Y),
+        Duration = 8
     })
 end })
+
+-- Quick self-info: print current Y and nearest target info
+TabDebug:CreateButton({ Name = "Quick: Self Y + Nearest Target", Callback = function()
+    local c = getChar(); local r = getHRP(c)
+    if not r then return end
+
+    local myY = r.Position.Y
+    local target, dist, scanLog = nearestPlayer(PUNCH_Y_DIFF, true)
+
+    local lines = {}
+    table.insert(lines, ("Self Y = %.2f"):format(myY))
+
+    if target then
+        local oh = getHRP(target.Character)
+        table.insert(lines, ("Target: %s"):format(target.Name))
+        table.insert(lines, ("Dist=%.1f Y=%.2f"):format(dist, oh and oh.Position.Y or -1))
+    else
+        table.insert(lines, "No valid target found")
+    end
+
+    -- Show skipped count and top skip reason
+    local skipReasons = {}
+    for _, e in ipairs(scanLog) do
+        if e.skip ~= "OK_candidate" then
+            skipReasons[#skipReasons+1] = e.name .. "→" .. e.skip
+        end
+    end
+    if #skipReasons > 0 then
+        table.insert(lines, "Skipped: " .. table.concat(skipReasons, " | "))
+    end
+
+    local msg = table.concat(lines, "\n")
+    print("[POE Quick Scan] " .. msg)
+    Rayfield:Notify({ Title="Quick Scan", Content=msg, Duration=10 })
+end })
+
+-- Continuous scan: prints to console every 2s while enabled
+local continuousActive = false
+TabDebug:CreateToggle({ Name = "Continuous Scan (console, 2s)", CurrentValue = false,
+    Flag = "ContinuousScan",
+    Callback = function(v)
+        continuousActive = v
+        if v then
+            task.spawn(function()
+                while continuousActive do
+                    local c2 = getChar(); local r2 = getHRP(c2)
+                    if r2 then
+                        local target, dist, scanLog = nearestPlayer(PUNCH_Y_DIFF, true)
+                        local okList, skipList = {}, {}
+                        for _, e in ipairs(scanLog) do
+                            if e.skip == "OK_candidate" then
+                                table.insert(okList, ("%s(%.1f)"):format(e.name, e.dist))
+                            else
+                                table.insert(skipList, ("%s[%s]"):format(e.name, e.skip))
+                            end
+                        end
+                        print(("[SCAN] SelfY=%.1f | OK: %s | Skip: %s"):format(
+                            r2.Position.Y,
+                            #okList > 0 and table.concat(okList,",") or "none",
+                            #skipList > 0 and table.concat(skipList,",") or "none"
+                        ))
+                    end
+                    task.wait(2)
+                end
+            end)
+        end
+    end
+})
+
+TabDebug:CreateSection("Thresholds (live-tune)")
+TabDebug:CreateSlider({ Name = "Punch Y Diff", Range = {3,25}, Increment = 1, CurrentValue = 8,
+    Flag = "PunchYDiff",
+    Callback = function(v) PUNCH_Y_DIFF = v end })
+TabDebug:CreateSlider({ Name = "Max Target Dist", Range = {20,300}, Increment = 5, CurrentValue = 200,
+    Flag = "MaxTargetDist",
+    Callback = function(v) MAX_TARGET_DIST = v end })
+TabDebug:CreateSlider({ Name = "Punch Dist Max", Range = {10,100}, Increment = 5, CurrentValue = 60,
+    Flag = "PunchDistMax",
+    Callback = function(v) PUNCH_DIST_MAX = v end })
