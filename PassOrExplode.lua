@@ -139,6 +139,13 @@ local noclipTimer   = 0
 local noFallBV      = nil
 local ghostActive   = false
 
+-- Doppelganger: mirror target's movement delta each frame
+-- prevTargetPos: last known position of chase target
+-- Used by Auto Pass Bomb + AFK run mode to follow path, not just position
+local doppelTarget    = nil   -- current player being mirrored
+local doppelPrevPos   = nil   -- target's position last frame
+local DOPPEL_OFFSET   = 2     -- studs behind target (not on top)
+
 -- ─── Remotes ──────────────────────────────────────────────────────────────────
 local remoteAction  = nil
 local remoteEndgame = nil
@@ -378,26 +385,44 @@ RunService.Heartbeat:Connect(function(dt)
                 if oh then
                     local shouldTeleport = bombTimer and bombTimer <= AFK_TELEPORT_THRESH
                     if shouldTeleport or (cfg.BombTeleport) then
-                        -- Emergency teleport: snap in front of target
-                        local preCF = r.CFrame
-                        local preY  = r.Position.Y
-                        local dir   = oh.CFrame.LookVector
-                        r.CFrame    = CFrame.new(
-                            oh.Position + Vector3.new(dir.X,0,dir.Z)*3,
-                            oh.Position)
-                        task.defer(function()
-                            local pr = getHRP(getChar())
-                            if pr and (preY - pr.Position.Y) > 12 then
-                                pr.CFrame = preCF
-                            end
-                        end)
+                        -- Emergency teleport: snap ON TOP of target (Y+2) so we
+                        -- stay on arena floor instead of potentially landing outside
+                        local safePos = Vector3.new(
+                            oh.Position.X,
+                            oh.Position.Y + 2,
+                            oh.Position.Z)
+                        r.CFrame = CFrame.new(safePos, Vector3.new(
+                            oh.Position.X, safePos.Y, oh.Position.Z))
+                        -- No snap-back needed: landing on target means on arena
                     elseif dist > STOP_DIST then
-                        -- Run toward target, overshoot so no decel zone
+                        -- Doppelganger: mirror target's movement delta
+                        -- so we follow their path including jumps and direction changes
                         if noFallBV then noFallBV.MaxForce = Vector3.new(0,0,0) end
-                        local d = Vector3.new(
-                            oh.Position.X-r.Position.X, 0,
-                            oh.Position.Z-r.Position.Z)
-                        h:MoveTo(oh.Position + d.Unit * 8)
+                        if doppelTarget ~= target then
+                            -- New target — reset mirror state
+                            doppelTarget  = target
+                            doppelPrevPos = oh.Position
+                        end
+                        if doppelPrevPos then
+                            local delta = oh.Position - doppelPrevPos
+                            -- Apply delta to our position (mirror movement)
+                            -- Cap delta magnitude to avoid rubber-banding on teleport
+                            if delta.Magnitude < 10 and delta.Magnitude > 0.01 then
+                                local newGoal = r.Position + delta
+                                h:MoveTo(newGoal)
+                                -- Mirror jump: if target jumped (Y delta > 1), jump too
+                                if delta.Y > 1 then
+                                    h:ChangeState(Enum.HumanoidStateType.Jumping)
+                                end
+                            else
+                                -- Target didn't move or teleported — fallback overshoot
+                                local d = Vector3.new(
+                                    oh.Position.X-r.Position.X, 0,
+                                    oh.Position.Z-r.Position.Z)
+                                h:MoveTo(oh.Position + d.Unit * 8)
+                            end
+                        end
+                        doppelPrevPos = oh.Position
                     end
                 end
             end
@@ -408,14 +433,30 @@ RunService.Heartbeat:Connect(function(dt)
     end
 
     -- Auto Pass Bomb (manual mode, independent of AFK)
+    -- Uses doppelganger movement: mirrors target delta so obstacles are handled
     if cfg.AutoPassBomb and not cfg.BombTeleport and not cfg.AFK and holding then
         if noFallBV then noFallBV.MaxForce = Vector3.new(0,0,0) end
         local target, dist = nearestPlayer(nil)
         if target and target.Character then
             local oh = getHRP(target.Character)
             if oh and dist > STOP_DIST then
-                local d = Vector3.new(oh.Position.X-r.Position.X, 0, oh.Position.Z-r.Position.Z)
-                h:MoveTo(oh.Position + d.Unit * 8)
+                if doppelTarget ~= target then
+                    doppelTarget  = target
+                    doppelPrevPos = oh.Position
+                end
+                if doppelPrevPos then
+                    local delta = oh.Position - doppelPrevPos
+                    if delta.Magnitude < 10 and delta.Magnitude > 0.01 then
+                        h:MoveTo(r.Position + delta)
+                        if delta.Y > 1 then
+                            h:ChangeState(Enum.HumanoidStateType.Jumping)
+                        end
+                    else
+                        local d = Vector3.new(oh.Position.X-r.Position.X, 0, oh.Position.Z-r.Position.Z)
+                        h:MoveTo(oh.Position + d.Unit * 8)
+                    end
+                end
+                doppelPrevPos = oh.Position
             end
         end
     end
@@ -467,6 +508,7 @@ end)
 LocalPlayer.CharacterAdded:Connect(function()
     noFallBV = nil; ghostActive = false
     noclipTimer = 0; teleportTimer = 0; punchTimer = 0
+    doppelTarget = nil; doppelPrevPos = nil
     resetArenaY()
     task.wait(1)
     if cfg.NoFall then setupNoFall(true) end
