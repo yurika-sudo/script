@@ -521,8 +521,18 @@ TabDebug:CreateToggle({ Name = "Continuous Scan (2s)", CurrentValue = false, Fla
 
 TabDebug:CreateSection("Bomb Timer Scanner")
 
--- Scan all TextLabels in PlayerGui + CoreGui for countdown numbers (1-10)
--- Goal: find the GUI object name that shows the bomb countdown
+-- Shorten a full path to last N components so it fits on one overlay line
+local function shortPath(fullPath, n)
+    n = n or 4
+    local parts = {}
+    for seg in fullPath:gmatch("[^%.]+") do table.insert(parts, seg) end
+    local start = math.max(1, #parts - n + 1)
+    local out = {}
+    for i = start, #parts do table.insert(out, parts[i]) end
+    return table.concat(out, ".")
+end
+
+-- Live scan: only logs when value changes, shows last 4 path segments
 local timerScanActive = false
 TabDebug:CreateToggle({ Name = "Scan Bomb Timer (live)", CurrentValue = false, Flag = "TimerScan",
     Callback = function(v)
@@ -530,97 +540,115 @@ TabDebug:CreateToggle({ Name = "Scan Bomb Timer (live)", CurrentValue = false, F
         overlayFrame.Visible = v
         if v then
             task.spawn(function()
-                local lastFound = {}
+                local lastSnapshot = {}  -- path -> val
                 while timerScanActive do
-                    local found = {}
-                    -- Search PlayerGui + CoreGui
                     local roots = { LocalPlayer.PlayerGui }
-                    pcall(function()
-                        table.insert(roots, game:GetService("CoreGui"))
-                    end)
+                    pcall(function() table.insert(roots, game:GetService("CoreGui")) end)
+                    local snapshot = {}
                     for _, root in ipairs(roots) do
                         for _, lbl in ipairs(root:GetDescendants()) do
                             if lbl:IsA("TextLabel") or lbl:IsA("TextButton") then
                                 local txt = lbl.Text:match("^%s*(%d+)%s*$")
                                 local num = txt and tonumber(txt)
-                                if num and num >= 1 and num <= 15 then
-                                    table.insert(found, {
-                                        path = lbl:GetFullName(),
-                                        val  = num,
-                                        vis  = lbl.Visible,
-                                    })
+                                if num and num >= 1 and num <= 15 and lbl.Visible then
+                                    snapshot[lbl:GetFullName()] = num
                                 end
                             end
                         end
                     end
-                    -- Only log if something changed
-                    local changed = #found ~= #lastFound
-                    if not changed then
-                        for i, f in ipairs(found) do
-                            if not lastFound[i] or lastFound[i].val ~= f.val
-                                or lastFound[i].path ~= f.path then
-                                changed = true; break
-                            end
+                    -- Log only changed entries
+                    for path, val in pairs(snapshot) do
+                        if lastSnapshot[path] ~= val then
+                            overlayLog(
+                                ("[T] %d | %s"):format(val, shortPath(path, 4)),
+                                Color3.fromRGB(255,215,0)
+                            )
                         end
                     end
-                    if changed then
-                        if #found == 0 then
-                            overlayLog("[TIMER] no countdown labels found", Color3.fromRGB(160,160,160))
-                        else
-                            for _, f in ipairs(found) do
-                                overlayLog(
-                                    ("[TIMER] val=%d vis=%s | %s"):format(
-                                        f.val, tostring(f.vis), f.path),
-                                    Color3.fromRGB(255,215,0)
-                                )
-                            end
+                    -- Log entries that disappeared
+                    for path, _ in pairs(lastSnapshot) do
+                        if not snapshot[path] then
+                            overlayLog(
+                                ("[T] gone | %s"):format(shortPath(path, 4)),
+                                Color3.fromRGB(160,160,160)
+                            )
                         end
-                        lastFound = found
                     end
-                    task.wait(0.5)
+                    lastSnapshot = snapshot
+                    task.wait(0.3)
                 end
             end)
         end
     end
 })
 
--- One-shot: dump ALL TextLabels with numeric content regardless of value
--- Useful if countdown is > 10 or uses different format
-TabDebug:CreateButton({ Name = "Dump All Numeric Labels", Callback = function()
+-- Dump: visible numeric labels only, shortened path, during active round
+-- Run this WHILE bomb countdown is on screen
+TabDebug:CreateButton({ Name = "Dump Numeric Labels (visible)", Callback = function()
     local roots = { LocalPlayer.PlayerGui }
     pcall(function() table.insert(roots, game:GetService("CoreGui")) end)
     local results = {}
     for _, root in ipairs(roots) do
         for _, lbl in ipairs(root:GetDescendants()) do
-            if lbl:IsA("TextLabel") or lbl:IsA("TextButton") then
+            if (lbl:IsA("TextLabel") or lbl:IsA("TextButton")) and lbl.Visible then
                 local txt = lbl.Text:match("^%s*(%d+%.?%d*)%s*$")
                 if txt then
-                    table.insert(results, {
-                        path = lbl:GetFullName(),
-                        val  = txt,
-                        vis  = lbl.Visible,
-                    })
+                    table.insert(results, { short = shortPath(lbl:GetFullName(), 5), val = txt })
                 end
             end
         end
     end
     overlayFrame.Visible = true
-    overlayLog(("=NUMERIC LABELS total=%d"):format(#results), Color3.fromRGB(180,180,255))
+    overlayLog(("=VIS LABELS %d"):format(#results), Color3.fromRGB(180,180,255))
     for _, r2 in ipairs(results) do
-        overlayLog(
-            ("[%s] v=%s %s"):format(
-                r2.vis and "VIS" or "hid",
-                r2.val,
-                r2.path
-            ),
-            r2.vis and Color3.fromRGB(220,220,100) or Color3.fromRGB(140,140,140)
-        )
+        overlayLog(("v=%s %s"):format(r2.val, r2.short), Color3.fromRGB(220,220,100))
     end
-    Rayfield:Notify({
-        Title   = ("Labels: %d"):format(#results),
-        Content = "Check overlay for full list",
-        Duration = 5
-    })
+    Rayfield:Notify({ Title=("Labels:%d"):format(#results), Content="Check overlay", Duration=4 })
+end })
+
+-- Workspace bomb object scanner: look for Parts/Models with bomb-related names
+-- or with IntValue/NumberValue children that could be a timer
+TabDebug:CreateButton({ Name = "Scan Workspace Bomb Objects", Callback = function()
+    local BOMB_KEYWORDS = {"bomb","timer","countdown","fuse","explosive","tnt"}
+    local function matchesBomb(name)
+        local l = name:lower()
+        for _, kw in ipairs(BOMB_KEYWORDS) do
+            if l:find(kw, 1, true) then return true end
+        end
+        return false
+    end
+    local found = {}
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if matchesBomb(obj.Name) then
+            -- Collect any numeric children (timer values)
+            local vals = {}
+            for _, child in ipairs(obj:GetChildren()) do
+                if child:IsA("IntValue") or child:IsA("NumberValue") or child:IsA("StringValue") then
+                    table.insert(vals, child.Name.."="..tostring(child.Value))
+                end
+            end
+            table.insert(found, {
+                name  = obj.Name,
+                class = obj.ClassName,
+                path  = shortPath(obj:GetFullName(), 4),
+                vals  = table.concat(vals, ","),
+            })
+        end
+    end
+    overlayFrame.Visible = true
+    overlayLog(("=WS BOMB SCAN found=%d"):format(#found), Color3.fromRGB(180,180,255))
+    if #found == 0 then
+        overlayLog("Nothing found. Try during active round.", Color3.fromRGB(160,160,160))
+    else
+        for _, f in ipairs(found) do
+            overlayLog(
+                ("[%s] %s | %s"):format(f.class:sub(1,6), f.path,
+                    f.vals ~= "" and f.vals or "no values"),
+                Color3.fromRGB(100,255,200)
+            )
+        end
+    end
+    Rayfield:Notify({ Title="WS Bomb Scan", Content=(#found.." objects found\nCheck overlay"), Duration=5 })
 end })
 
 TabDebug:CreateSection("Movement Logger")
