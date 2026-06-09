@@ -183,8 +183,8 @@ abilityGui.ResetOnSpawn = false
 abilityGui.Parent       = LocalPlayer.PlayerGui
 
 local abilityLabel = Instance.new("TextLabel")
-abilityLabel.Size                   = UDim2.new(0.6, 0, 0.35, 0)
-abilityLabel.Position               = UDim2.new(0.38, 0, 0.08, 0)
+abilityLabel.Size                   = UDim2.new(0.95, 0, 0.55, 0)
+abilityLabel.Position               = UDim2.new(0.02, 0, 0.05, 0)
 abilityLabel.BackgroundColor3       = Color3.fromRGB(10, 10, 30)
 abilityLabel.BackgroundTransparency = 0.1
 abilityLabel.TextColor3             = Color3.fromRGB(255, 220, 80)
@@ -446,32 +446,59 @@ Window:Button("Scan Abilities", function()
     for i = 1, math.min(#hits, 8) do table.insert(lines, hits[i]) end
     if #hits > 8 then table.insert(lines, "...+" .. (#hits-8) .. " more") end
 
-    -- 2. Require AbilityCatalog and dump names + speed values
+    -- 2. Require AbilityCatalog — drill into nested structure
+    -- catalog = { Abilities = ModuleScript, DefaultAbility = "Runner" }
+    -- so we require catalog first, then require catalog.Abilities if present
     table.insert(lines, ""); table.insert(lines, "[AbilityCatalog]")
     local catalogModule = RS:FindFirstChild("Shared")
         and RS.Shared:FindFirstChild("AbilityCatalog")
     if catalogModule then
         local ok, catalog = pcall(require, catalogModule)
         if ok and type(catalog) == "table" then
-            local count = 0
-            for id, data in pairs(catalog) do
-                count = count + 1
-                if count <= 12 then
-                    local extra = ""
-                    if type(data) == "table" then
-                        local spd = data.Speed or data.speed or data.WalkSpeed
-                        local dur = data.Duration or data.duration
-                        local nm  = data.Name or data.name or tostring(id)
-                        if spd then extra = extra .. " spd=" .. tostring(spd) end
-                        if dur then extra = extra .. " dur=" .. tostring(dur) end
-                        table.insert(lines, string.format("  [%s] %s%s", tostring(id), nm, extra))
-                    else
-                        table.insert(lines, string.format("  [%s]=%s", tostring(id), tostring(data)))
-                    end
+            -- Show top-level keys
+            table.insert(lines, "DefaultAbility: " .. tostring(catalog.DefaultAbility or "?"))
+
+            -- Drill into catalog.Abilities if it's a ModuleScript
+            local abilitiesData = nil
+            if type(catalog.Abilities) == "table" then
+                abilitiesData = catalog.Abilities
+            elseif typeof(catalog.Abilities) == "Instance"
+                and catalog.Abilities:IsA("ModuleScript") then
+                local ok2, inner = pcall(require, catalog.Abilities)
+                if ok2 and type(inner) == "table" then
+                    abilitiesData = inner
+                    table.insert(lines, "Inner require: ok")
+                else
+                    table.insert(lines, "Inner require failed: " .. tostring(inner))
                 end
             end
-            if count > 12 then table.insert(lines, "  ...+" .. (count-12) .. " more") end
-            table.insert(lines, "Total: " .. count .. " abilities")
+
+            if abilitiesData then
+                local count = 0
+                for id, data in pairs(abilitiesData) do
+                    count = count + 1
+                    if count <= 15 then
+                        local extra = ""
+                        if type(data) == "table" then
+                            local spd = data.Speed or data.speed or data.WalkSpeed
+                            local dur = data.Duration or data.duration
+                            local nm  = data.Name or data.name or tostring(id)
+                            if spd then extra = extra .. " spd=" .. tostring(spd) end
+                            if dur then extra = extra .. " dur=" .. tostring(dur) end
+                            table.insert(lines, string.format("  [%s] %s%s", tostring(id), nm, extra))
+                        else
+                            table.insert(lines, string.format("  [%s]=%s", tostring(id), tostring(data)))
+                        end
+                    end
+                end
+                if count > 15 then table.insert(lines, "  ...+" .. (count-15) .. " more") end
+                table.insert(lines, "Total: " .. count .. " abilities")
+            else
+                -- Fallback: dump raw top-level catalog keys
+                for k, v2 in pairs(catalog) do
+                    table.insert(lines, string.format("  raw[%s]=%s", tostring(k), tostring(v2)))
+                end
+            end
         else
             table.insert(lines, "require failed: " .. tostring(catalog))
         end
