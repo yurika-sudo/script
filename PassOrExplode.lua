@@ -18,20 +18,23 @@ local cfg = {
     NoFall       = false,
     FreeFly      = false,
     AutoPunch    = false,
+    GodMode      = false,
 }
 
 -- ── Tunable constants ─────────────────────────────────────────────────────────
-local SPEED_BOMB    = 22   -- walkspeed while chasing to pass bomb (default preset)
-local SPEED_IDLE    = 20   -- walkspeed when speed boost on but not chasing
-local SPEED_DEFAULT = 16   -- game default
+local SPEED_BOMB    = 22
+local SPEED_IDLE    = 20
+local SPEED_DEFAULT = 16
 
-local MAX_TARGET_DIST = 200  -- ignore players further than this (studs)
-local MAX_Y_DIFF      = 15   -- max vertical diff to consider same arena
+local MAX_TARGET_DIST  = 200
+local MAX_Y_DIFF       = 15   -- general arena filter
+local PUNCH_Y_DIFF     = 8    -- tighter filter for Auto Punch only
+local LOBBY_Y_THRESH   = 10   -- Y below this = lobby, auto-off punch
 
-local STOP_DIST   = 4    -- stop chasing when this close (studs)
-local NEAR_DIST   = 10   -- "CLOSE" zone label threshold
-local PUNCH_RANGE = 6    -- fire punch when within this range
-local PUNCH_RATE  = 0.45 -- seconds between punch attempts
+local STOP_DIST   = 4
+local NEAR_DIST   = 10
+local PUNCH_RANGE = 6
+local PUNCH_RATE  = 0.45
 local FLY_SPEED   = 40
 
 -- ── State ─────────────────────────────────────────────────────────────────────
@@ -41,16 +44,17 @@ local noclipTimer   = 0
 local noFallBV      = nil
 local freeFlyBV     = nil
 local ghostActive   = false
-local toggleAutoPunch = nil  -- UI ref for CharacterAdded sync
+local toggleAutoPunch = nil
+local toggleGodMode   = nil
 
--- ── Confirmed remotes (path verified via scan) ────────────────────────────────
+-- ── Confirmed remotes ─────────────────────────────────────────────────────────
 local remoteAction  = nil
 local remoteEndgame = nil
 task.spawn(function()
     local events = RS:WaitForChild("Remotes", 10)
         and RS.Remotes:WaitForChild("Events", 10)
     if not events then return end
-    remoteAction  = events:WaitForChild("ActionEvent",      10)
+    remoteAction  = events:WaitForChild("ActionEvent",       10)
     remoteEndgame = events:WaitForChild("EndgameAttackEvent", 10)
 end)
 
@@ -70,10 +74,8 @@ local function hasBomb(c)
     return ok and val == true
 end
 
--- Returns nearest alive player.
--- requireSameHeight=true: skip players whose Y differs by more than MAX_Y_DIFF
--- (prevents targeting lobby spectators when NoFall keeps us elevated)
-local function nearestPlayer(requireSameHeight)
+-- yDiffLimit: max Y diff allowed (pass nil to skip height filter)
+local function nearestPlayer(yDiffLimit)
     local c = getChar(); local h = getHRP(c)
     if not h then return nil, math.huge end
     local best, bestDist = nil, math.huge
@@ -84,7 +86,7 @@ local function nearestPlayer(requireSameHeight)
             if oh and ph and ph.Health > 0 then
                 local d     = (h.Position - oh.Position).Magnitude
                 local yDiff = math.abs(h.Position.Y - oh.Position.Y)
-                local heightOk = (not requireSameHeight) or (yDiff <= MAX_Y_DIFF)
+                local heightOk = (not yDiffLimit) or (yDiff <= yDiffLimit)
                 if d < bestDist and d <= MAX_TARGET_DIST and heightOk then
                     bestDist = d
                     best     = p
@@ -140,7 +142,6 @@ local function setupFreeFly(enable)
     freeFlyBV   = bv
 end
 
--- Fires punch via confirmed remotes + VIM screen tap at target position
 local function firePunch(targetChar, targetHRP)
     if remoteAction then
         pcall(function() remoteAction:FireServer("Punch") end)
@@ -162,16 +163,50 @@ local function firePunch(targetChar, targetHRP)
     end)
 end
 
--- ── Minimal debug label ───────────────────────────────────────────────────────
--- Shows: dist to nearest / bomb status / player count / own Y
--- Small footprint, no scan panel, no exports
+-- ── Ability scanner ───────────────────────────────────────────────────────────
+-- Searches RS descendants for anything with "Speed", "Ability", or "Boost"
+-- in the name. Outputs to a small timed overlay for bug-bounty audit.
+-- Filters out lighting/animation noise (LightRange, Weight, etc).
+local ABILITY_KEYWORDS = {"speed", "ability", "boost", "faster", "carrier", "status"}
+local ABILITY_NOISE    = {"light", "weight", "damp", "bright", "angle", "range", "anim"}
+
+local function wordMatch(s, list)
+    local low = s:lower()
+    for _, w in ipairs(list) do
+        if low:find(w, 1, true) then return true end
+    end
+    return false
+end
+
+local abilityGui = Instance.new("ScreenGui")
+abilityGui.Name         = "POEAbility"
+abilityGui.ResetOnSpawn = false
+abilityGui.Parent       = LocalPlayer.PlayerGui
+
+local abilityLabel = Instance.new("TextLabel")
+abilityLabel.Size                   = UDim2.new(0.6, 0, 0.35, 0)
+abilityLabel.Position               = UDim2.new(0.38, 0, 0.08, 0)
+abilityLabel.BackgroundColor3       = Color3.fromRGB(10, 10, 30)
+abilityLabel.BackgroundTransparency = 0.1
+abilityLabel.TextColor3             = Color3.fromRGB(255, 220, 80)
+abilityLabel.TextSize               = 11
+abilityLabel.Font                   = Enum.Font.Code
+abilityLabel.TextXAlignment         = Enum.TextXAlignment.Left
+abilityLabel.TextYAlignment         = Enum.TextYAlignment.Top
+abilityLabel.TextWrapped            = true
+abilityLabel.Text                   = ""
+abilityLabel.BorderSizePixel        = 0
+abilityLabel.Visible                = false
+abilityLabel.Parent                 = abilityGui
+
+-- ── Debug label ───────────────────────────────────────────────────────────────
 local debugGui = Instance.new("ScreenGui")
 debugGui.Name         = "POEDebug"
 debugGui.ResetOnSpawn = false
 debugGui.Parent       = LocalPlayer.PlayerGui
 
 local debugLabel = Instance.new("TextLabel")
-debugLabel.Size                   = UDim2.new(0, 200, 0, 72)
+debugLabel.Size                   = UDim2.new(0, 200, 0, 86)
 debugLabel.Position               = UDim2.new(0, 8, 0.45, 0)
 debugLabel.BackgroundColor3       = Color3.fromRGB(0, 0, 0)
 debugLabel.BackgroundTransparency = 0.45
@@ -192,16 +227,35 @@ RunService.Heartbeat:Connect(function(dt)
     if not r then return end
 
     local holding = hasBomb(c)
+    local myY     = r.Position.Y
+
+    -- God Mode: lock health to max every frame (client-side best effort)
+    if cfg.GodMode then
+        if h.Health < h.MaxHealth then
+            h.Health = h.MaxHealth
+        end
+    end
+
+    -- Auto-disable AutoPunch when we return to lobby (Y drops below threshold)
+    -- This is the fallback for round-end since we have no server timer
+    if cfg.AutoPunch and myY < LOBBY_Y_THRESH then
+        cfg.AutoPunch = false
+        if toggleAutoPunch then
+            pcall(function() toggleAutoPunch:Set(false) end)
+        end
+    end
 
     -- Speed management
+    -- No Fall is suppressed while Auto Pass Bomb is active so physics
+    -- doesn't fight the Humanoid chasing movement on sloped terrain
+    local chasing = holding and (cfg.AutoPassBomb or cfg.BombTeleport)
     local targetSpd = SPEED_DEFAULT
     if cfg.SpeedEnabled then
-        targetSpd = (holding and (cfg.AutoPassBomb or cfg.BombTeleport))
-            and SPEED_BOMB or SPEED_IDLE
+        targetSpd = chasing and SPEED_BOMB or SPEED_IDLE
     end
     if h.WalkSpeed ~= targetSpd then h.WalkSpeed = targetSpd end
 
-    -- Ghost: re-apply every 0.3s so round transitions don't reset it
+    -- Ghost: re-apply every 0.3s
     if cfg.Noclip then
         noclipTimer = noclipTimer + dt
         if noclipTimer >= 0.3 then
@@ -213,13 +267,12 @@ RunService.Heartbeat:Connect(function(dt)
         noclipTimer = 0
     end
 
-    -- Bomb Teleport: snap in front of nearest same-height player
-    -- 0.25s cooldown; post-teleport Y-drop safety snaps back if we fell off arena
+    -- Bomb Teleport
     if cfg.BombTeleport and holding then
         teleportTimer = teleportTimer + dt
         if teleportTimer >= 0.25 then
             teleportTimer = 0
-            local target, _ = nearestPlayer(true)
+            local target, _ = nearestPlayer(MAX_Y_DIFF)
             if target and target.Character then
                 local oh = getHRP(target.Character)
                 if oh then
@@ -242,9 +295,11 @@ RunService.Heartbeat:Connect(function(dt)
         teleportTimer = 0
     end
 
-    -- Auto Pass Bomb: overshoot MoveTo so Humanoid never enters deceleration zone
+    -- Auto Pass Bomb: overshoot MoveTo, suppress No Fall while chasing
     if cfg.AutoPassBomb and not cfg.BombTeleport and holding then
-        local target, dist = nearestPlayer()
+        -- Temporarily suspend No Fall so it doesn't fight movement on slopes
+        if noFallBV then noFallBV.MaxForce = Vector3.new(0, 0, 0) end
+        local target, dist = nearestPlayer(nil)
         if target and target.Character then
             local oh = getHRP(target.Character)
             if oh and dist > STOP_DIST then
@@ -254,23 +309,22 @@ RunService.Heartbeat:Connect(function(dt)
                 h:MoveTo(oh.Position + dirXZ.Unit * 8)
             end
         end
-    end
-
-    -- No Fall: cancel downward velocity (skip if FreeFly is active)
-    if cfg.NoFall and noFallBV and not cfg.FreeFly then
-        local vel = r.AssemblyLinearVelocity
-        if vel.Y < 0 then
-            noFallBV.MaxForce = Vector3.new(0, 1e6, 0)
-            noFallBV.Velocity = Vector3.new(0, 0, 0)
-        else
-            noFallBV.MaxForce = Vector3.new(0, 0, 0)
+    else
+        -- No Fall: cancel downward velocity (skip if FreeFly active)
+        if cfg.NoFall and noFallBV and not cfg.FreeFly then
+            local vel = r.AssemblyLinearVelocity
+            if vel.Y < 0 then
+                noFallBV.MaxForce = Vector3.new(0, 1e6, 0)
+                noFallBV.Velocity = Vector3.new(0, 0, 0)
+            else
+                noFallBV.MaxForce = Vector3.new(0, 0, 0)
+            end
         end
     end
 
-    -- Free Fly: suspend while actively chasing to pass bomb
-    local bombChasing = holding and (cfg.AutoPassBomb or cfg.BombTeleport)
+    -- Free Fly: suspend while chasing
     if cfg.FreeFly and freeFlyBV then
-        if bombChasing then
+        if chasing then
             freeFlyBV.MaxForce = Vector3.new(0, 0, 0)
         else
             freeFlyBV.MaxForce = Vector3.new(1e6, 1e6, 1e6)
@@ -283,9 +337,9 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- Auto Punch: height-filtered to avoid targeting lobby/spectator players
+    -- Auto Punch: tighter Y filter (PUNCH_Y_DIFF=8) to avoid lobby targets
     if cfg.AutoPunch then
-        local target, dist = nearestPlayer(true)
+        local target, dist = nearestPlayer(PUNCH_Y_DIFF)
         if target and target.Character then
             local oh = getHRP(target.Character)
             if oh then
@@ -299,8 +353,8 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- Debug label update
-    local _, dist2 = nearestPlayer()
+    -- Debug label
+    local _, dist2 = nearestPlayer(nil)
     local distStr  = dist2 == math.huge and "--" or string.format("%.1f", dist2)
     local zoneStr  = dist2 <= STOP_DIST and "STOP"
                   or dist2 <= NEAR_DIST  and "CLOSE"
@@ -312,15 +366,14 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
     debugLabel.Text = string.format(
-        "dist: %s (%s)\nbomb: %s\nplayers: %d\nY: %.1f",
+        "dist: %s (%s)\nbomb: %s\nplayers: %d\nY: %.1f | god: %s",
         distStr, zoneStr,
         holding and "YES" or "no",
-        count, r.Position.Y)
+        count, myY,
+        cfg.GodMode and "ON" or "off")
 end)
 
 -- ── CharacterAdded ────────────────────────────────────────────────────────────
--- Reset physics state + auto-disable AutoPunch so VIM clicks don't land on
--- the virtual joystick after lobby teleport
 LocalPlayer.CharacterAdded:Connect(function()
     noFallBV = nil; freeFlyBV = nil; ghostActive = false
     noclipTimer = 0; teleportTimer = 0; punchTimer = 0
@@ -331,6 +384,9 @@ LocalPlayer.CharacterAdded:Connect(function()
             pcall(function() toggleAutoPunch:Set(false) end)
         end
     end
+
+    -- God Mode survives respawn — re-hook health on new character
+    -- (Heartbeat loop picks it up automatically, no extra setup needed)
 
     task.wait(1)
     if cfg.FreeFly then setupFreeFly(true) end
@@ -347,28 +403,23 @@ Window:Toggle("Ghost Mode",     false, function(s)
     end
 end)
 Window:Toggle("Speed Boost",    false, function(s) cfg.SpeedEnabled = s end)
-
--- Speed presets — only affect SPEED_BOMB (chase speed while holding bomb).
--- SPEED_IDLE stays at 20 regardless of preset.
--- 22 = safe default | 24 = subtle boost | 26 = matches in-game P2W speed ability
 Window:Button("Speed 22 (safe)", function()
     SPEED_BOMB = 22
-    local c = getChar(); local h = getHum(c)
+    local h = getHum(getChar())
     if h then h.WalkSpeed = cfg.SpeedEnabled and SPEED_BOMB or SPEED_DEFAULT end
 end)
 Window:Button("Speed 24 (boost)", function()
     SPEED_BOMB = 24
-    local c = getChar(); local h = getHum(c)
+    local h = getHum(getChar())
     if h then h.WalkSpeed = cfg.SpeedEnabled and SPEED_BOMB or SPEED_DEFAULT end
 end)
 Window:Button("Speed 26 (match P2W)", function()
     SPEED_BOMB = 26
-    local c = getChar(); local h = getHum(c)
+    local h = getHum(getChar())
     if h then h.WalkSpeed = cfg.SpeedEnabled and SPEED_BOMB or SPEED_DEFAULT end
 end)
-
-Window:Toggle("No Fall",        false, function(s) cfg.NoFall = s; setupNoFall(s) end)
-Window:Toggle("Free Fly",       false, function(s)
+Window:Toggle("No Fall",  false, function(s) cfg.NoFall = s; setupNoFall(s) end)
+Window:Toggle("Free Fly", false, function(s)
     cfg.FreeFly = s
     setupFreeFly(s)
     if not s and cfg.NoFall then setupNoFall(true) end
@@ -376,4 +427,35 @@ end)
 toggleAutoPunch = Window:Toggle("Auto Punch", false, function(s)
     cfg.AutoPunch = s
     punchTimer    = 0
+end)
+toggleGodMode = Window:Toggle("God Mode", false, function(s)
+    cfg.GodMode = s
+end)
+
+-- Ability scanner: filter RS for speed/ability/boost paths (bug bounty audit)
+-- Tap button → results appear top-right for 20s then auto-hide
+Window:Button("Scan Abilities", function()
+    local hits = {}
+    for _, v in ipairs(RS:GetDescendants()) do
+        local name = v.Name
+        if wordMatch(name, ABILITY_KEYWORDS) and not wordMatch(name, ABILITY_NOISE) then
+            local ok, val = pcall(function() return v.Value end)
+            local valStr = ok and (" = " .. tostring(val)) or ""
+            table.insert(hits, string.format("[%s] %s%s", v.ClassName, v:GetFullName(), valStr))
+        end
+    end
+    if #hits == 0 then
+        abilityLabel.Text = "[Scan] No ability/speed/boost values found in RS"
+    else
+        local lines = {"[Scan] " .. #hits .. " hits:"}
+        for i = 1, math.min(#hits, 20) do
+            table.insert(lines, hits[i])
+        end
+        if #hits > 20 then
+            table.insert(lines, "...and " .. (#hits - 20) .. " more")
+        end
+        abilityLabel.Text = table.concat(lines, "\n")
+    end
+    abilityLabel.Visible = true
+    task.delay(20, function() abilityLabel.Visible = false end)
 end)
