@@ -248,24 +248,34 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- Auto Punch
+    -- Auto Punch: chase target → stop at PUNCH_RANGE → punch + knockback
     if cfg.AutoPunch then
-        if not punchNoFallBV then
-            local bv = Instance.new("BodyVelocity")
-            bv.Name = "PunchNoFallBV"; bv.Velocity = Vector3.new(0,0,0)
-            bv.MaxForce = Vector3.new(0,0,0); bv.Parent = r; punchNoFallBV = bv
-        end
-        local vel = r.AssemblyLinearVelocity
-        punchNoFallBV.MaxForce = vel.Y < 0 and Vector3.new(0,1e6,0) or Vector3.new(0,0,0)
-        punchNoFallBV.Velocity = Vector3.new(0,0,0)
-
         local target, dist = nearestPlayer(PUNCH_Y_DIFF)
         if target and target.Character and dist <= PUNCH_DIST_MAX then
             local oh = getHRP(target.Character)
             if oh then
-                punchTimer = punchTimer + dt
-                if dist <= PUNCH_RANGE and punchTimer >= PUNCH_RATE then
-                    punchTimer = 0; firePunch(target.Character, oh)
+                if dist > PUNCH_RANGE then
+                    -- Chase: walk toward target, stop when in punch range
+                    h:MoveTo(oh.Position)
+                else
+                    -- In range: fire punch every PUNCH_RATE seconds
+                    punchTimer = punchTimer + dt
+                    if punchTimer >= PUNCH_RATE then
+                        punchTimer = 0
+                        firePunch(target.Character, oh)
+                        -- Knockback: launch target away from us (replicated via physics)
+                        pcall(function()
+                            local dir = (oh.Position - r.Position)
+                            local flat = Vector3.new(dir.X, 0, dir.Z)
+                            if flat.Magnitude > 0 then
+                                oh.AssemblyLinearVelocity = Vector3.new(
+                                    flat.Unit.X * 90,
+                                    35,
+                                    flat.Unit.Z * 90
+                                )
+                            end
+                        end)
+                    end
                 end
             end
         end
@@ -314,12 +324,10 @@ TabPVP:CreateToggle({ Name = "Auto Punch", CurrentValue = false, Flag = "AutoPun
 
 -- UI: Abilities tab
 TabAbility:CreateSection("Use Ability")
-TabAbility:CreateButton({ Name = "Faster",    Callback = function() fireAbility("Faster")    end })
-TabAbility:CreateButton({ Name = "Invisible",  Callback = function() fireAbility("Invisible")  end })
-TabAbility:CreateButton({ Name = "Radar",     Callback = function() fireAbility("Radar")     end })
-TabAbility:CreateButton({ Name = "Silent",    Callback = function() fireAbility("Silent")    end })
-TabAbility:CreateButton({ Name = "Trap",      Callback = function() fireAbility("Trap")      end })
-TabAbility:CreateButton({ Name = "Shield",    Callback = function() fireAbility("Shield")    end })
+TabAbility:CreateButton({ Name = "Runner (default)", Callback = function() fireAbility("Runner") end })
+TabAbility:CreateButton({ Name = "Radar",            Callback = function() fireAbility("Radar")  end })
+TabAbility:CreateButton({ Name = "Trap",             Callback = function() fireAbility("Trap")   end })
+TabAbility:CreateButton({ Name = "Silent",           Callback = function() fireAbility("Silent") end })
 TabAbility:CreateSection("Debug")
 TabAbility:CreateButton({ Name = "Scan All Ability IDs", Callback = function()
     local catalog = RS:FindFirstChild("Shared") and RS.Shared:FindFirstChild("AbilityCatalog")
