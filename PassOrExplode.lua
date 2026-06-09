@@ -519,6 +519,166 @@ TabDebug:CreateToggle({ Name = "Continuous Scan (2s)", CurrentValue = false, Fla
     end
 })
 
+TabDebug:CreateSection("Bomb Timer Scanner")
+
+-- Scan all TextLabels in PlayerGui + CoreGui for countdown numbers (1-10)
+-- Goal: find the GUI object name that shows the bomb countdown
+local timerScanActive = false
+TabDebug:CreateToggle({ Name = "Scan Bomb Timer (live)", CurrentValue = false, Flag = "TimerScan",
+    Callback = function(v)
+        timerScanActive = v
+        overlayFrame.Visible = v
+        if v then
+            task.spawn(function()
+                local lastFound = {}
+                while timerScanActive do
+                    local found = {}
+                    -- Search PlayerGui + CoreGui
+                    local roots = { LocalPlayer.PlayerGui }
+                    pcall(function()
+                        table.insert(roots, game:GetService("CoreGui"))
+                    end)
+                    for _, root in ipairs(roots) do
+                        for _, lbl in ipairs(root:GetDescendants()) do
+                            if lbl:IsA("TextLabel") or lbl:IsA("TextButton") then
+                                local txt = lbl.Text:match("^%s*(%d+)%s*$")
+                                local num = txt and tonumber(txt)
+                                if num and num >= 1 and num <= 15 then
+                                    table.insert(found, {
+                                        path = lbl:GetFullName(),
+                                        val  = num,
+                                        vis  = lbl.Visible,
+                                    })
+                                end
+                            end
+                        end
+                    end
+                    -- Only log if something changed
+                    local changed = #found ~= #lastFound
+                    if not changed then
+                        for i, f in ipairs(found) do
+                            if not lastFound[i] or lastFound[i].val ~= f.val
+                                or lastFound[i].path ~= f.path then
+                                changed = true; break
+                            end
+                        end
+                    end
+                    if changed then
+                        if #found == 0 then
+                            overlayLog("[TIMER] no countdown labels found", Color3.fromRGB(160,160,160))
+                        else
+                            for _, f in ipairs(found) do
+                                overlayLog(
+                                    ("[TIMER] val=%d vis=%s | %s"):format(
+                                        f.val, tostring(f.vis), f.path),
+                                    Color3.fromRGB(255,215,0)
+                                )
+                            end
+                        end
+                        lastFound = found
+                    end
+                    task.wait(0.5)
+                end
+            end)
+        end
+    end
+})
+
+-- One-shot: dump ALL TextLabels with numeric content regardless of value
+-- Useful if countdown is > 10 or uses different format
+TabDebug:CreateButton({ Name = "Dump All Numeric Labels", Callback = function()
+    local roots = { LocalPlayer.PlayerGui }
+    pcall(function() table.insert(roots, game:GetService("CoreGui")) end)
+    local results = {}
+    for _, root in ipairs(roots) do
+        for _, lbl in ipairs(root:GetDescendants()) do
+            if lbl:IsA("TextLabel") or lbl:IsA("TextButton") then
+                local txt = lbl.Text:match("^%s*(%d+%.?%d*)%s*$")
+                if txt then
+                    table.insert(results, {
+                        path = lbl:GetFullName(),
+                        val  = txt,
+                        vis  = lbl.Visible,
+                    })
+                end
+            end
+        end
+    end
+    overlayFrame.Visible = true
+    overlayLog(("=NUMERIC LABELS total=%d"):format(#results), Color3.fromRGB(180,180,255))
+    for _, r2 in ipairs(results) do
+        overlayLog(
+            ("[%s] v=%s %s"):format(
+                r2.vis and "VIS" or "hid",
+                r2.val,
+                r2.path
+            ),
+            r2.vis and Color3.fromRGB(220,220,100) or Color3.fromRGB(140,140,140)
+        )
+    end
+    Rayfield:Notify({
+        Title   = ("Labels: %d"):format(#results),
+        Content = "Check overlay for full list",
+        Duration = 5
+    })
+end })
+
+TabDebug:CreateSection("Movement Logger")
+
+-- Log nearest target's movement direction every 0.5s
+-- Goal: understand movement patterns for "follow step" implementation
+local moveLogActive  = false
+local prevTargetPos  = nil
+local moveLogTimer   = 0
+TabDebug:CreateToggle({ Name = "Log Target Movement", CurrentValue = false, Flag = "MoveLog",
+    Callback = function(v)
+        moveLogActive = v
+        overlayFrame.Visible = v
+        if not v then prevTargetPos = nil; moveLogTimer = 0 end
+        if v then
+            task.spawn(function()
+                while moveLogActive do
+                    local c2 = getChar(); local r2 = getHRP(c2)
+                    if r2 then
+                        local target = nearestPlayer(PUNCH_Y_DIFF)
+                        if target and target.Character then
+                            local oh = getHRP(target.Character)
+                            if oh then
+                                local curPos = oh.Position
+                                if prevTargetPos then
+                                    local delta = curPos - prevTargetPos
+                                    local flatDelta = Vector3.new(delta.X, 0, delta.Z)
+                                    local speed = flatDelta.Magnitude / 0.5  -- studs/sec
+                                    local dirStr = "idle"
+                                    if speed > 0.5 then
+                                        -- Encode direction as rough compass
+                                        local angle = math.deg(math.atan2(flatDelta.X, flatDelta.Z))
+                                        if angle < 0 then angle = angle + 360 end
+                                        local dirs = {"N","NE","E","SE","S","SW","W","NW"}
+                                        local idx = math.floor((angle + 22.5) / 45) % 8 + 1
+                                        dirStr = dirs[idx]
+                                    end
+                                    overlayLog(
+                                        ("%s spd=%.1f dir=%s dY=%.1f"):format(
+                                            target.Name:sub(1,10),
+                                            speed, dirStr, delta.Y
+                                        ),
+                                        speed > 1 and Color3.fromRGB(100,255,150) or Color3.fromRGB(160,160,160)
+                                    )
+                                end
+                                prevTargetPos = curPos
+                            end
+                        else
+                            prevTargetPos = nil
+                        end
+                    end
+                    task.wait(0.5)
+                end
+            end)
+        end
+    end
+})
+
 TabDebug:CreateSection("Live Tune")
 TabDebug:CreateButton({ Name = "Reset Arena Y Detection", Callback = function()
     resetArenaY()
