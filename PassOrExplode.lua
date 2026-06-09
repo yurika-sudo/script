@@ -326,19 +326,22 @@ TabAbility:CreateButton({ Name = "Scan All Ability IDs", Callback = function()
     if not catalog then Rayfield:Notify({ Title="Scan", Content="AbilityCatalog not found", Duration=5 }); return end
     local ok, data = pcall(require, catalog)
     if not ok then Rayfield:Notify({ Title="Scan", Content=tostring(data), Duration=5 }); return end
-    -- Top-level keys = ability IDs (e.g. "Faster", "Invisible", etc.)
+
     local ids = {}
     if type(data) == "table" then
-        for k, v in pairs(data) do
-            -- Skip non-ability keys (strings that are property names)
+        -- Catalog is { Abilities = { [id] = {...}, ... }, DefaultAbility = "Runner" }
+        -- Drill into data.Abilities if it exists, otherwise use data directly
+        local src = (type(data.Abilities) == "table") and data.Abilities or data
+        for k, v in pairs(src) do
             if type(v) == "table" then
                 table.insert(ids, tostring(k))
             end
         end
     end
+
     Rayfield:Notify({
-        Title   = "Ability IDs (" .. #ids .. ")",
-        Content = table.concat(ids, ", "),
+        Title    = "Ability IDs (" .. #ids .. ")",
+        Content  = table.concat(ids, ", "),
         Duration = 20
     })
 end })
