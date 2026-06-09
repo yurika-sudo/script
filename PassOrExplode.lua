@@ -372,11 +372,52 @@ RunService.Heartbeat:Connect(function(dt)
     -- Bomb timer (read every frame, cheap)
     local bombTimer, bombCarrier = getBombTimer()
 
-    -- AFK Mode: handles bomb automatically when holding, idles naturally when not
-    -- Logic:
-    --   holding + timer <= AFK_TELEPORT_THRESH → teleport (guaranteed pass, beats obstacles)
-    --   holding + timer >  AFK_TELEPORT_THRESH → run toward nearest player (overshoot)
-    --   not holding → stop movement, stand still (look natural)
+    -- ── Shared doppelganger helper ──────────────────────────────────────────────
+    -- Used by both AFK mode and Auto Pass Bomb.
+    -- Mirrors target's XZ movement delta each frame so we follow their path
+    -- (handles obstacles, corners, stairs) without straight-line pathing.
+    --
+    -- Fixes vs previous version:
+    --   - delta Y is IGNORED for goal position (no Y-snap between floors)
+    --   - jump mirrored only when target delta.Y > 1.5 (less false positives)
+    --   - doppelPrevPos ALWAYS updated regardless of delta size (fixes stale state)
+    --   - fallback overshoot used when target is idle (delta < 0.05 flat)
+    local function doppelMove(oh, dist)
+        if noFallBV then noFallBV.MaxForce = Vector3.new(0,0,0) end
+        if doppelTarget ~= (oh and oh.Parent) then
+            doppelTarget  = oh and oh.Parent
+            doppelPrevPos = oh and oh.Position
+        end
+        if doppelPrevPos and oh then
+            local delta   = oh.Position - doppelPrevPos
+            local flatMag = Vector3.new(delta.X, 0, delta.Z).Magnitude
+            if flatMag > 0.05 and delta.Magnitude < 12 then
+                -- Mirror XZ delta only — keep our own Y so multi-floor doesn't snap us
+                local newGoal = Vector3.new(
+                    r.Position.X + delta.X,
+                    r.Position.Y,           -- preserve our Y
+                    r.Position.Z + delta.Z)
+                h:MoveTo(newGoal)
+                -- Mirror jump only on significant upward delta
+                if delta.Y > 1.5 then
+                    h:ChangeState(Enum.HumanoidStateType.Jumping)
+                end
+            elseif dist > STOP_DIST then
+                -- Target idle or teleported — fallback: overshoot toward target XZ
+                local d = Vector3.new(oh.Position.X-r.Position.X, 0, oh.Position.Z-r.Position.Z)
+                if d.Magnitude > 0 then
+                    h:MoveTo(oh.Position + d.Unit * 8)
+                end
+            end
+        end
+        -- Always update prev pos so next frame delta is fresh
+        if oh then doppelPrevPos = oh.Position end
+    end
+
+    -- AFK Mode
+    -- holding + timer <= thresh  → teleport on top of target (guaranteed pass)
+    -- holding + timer >  thresh  → doppelganger chase
+    -- not holding                → do nothing (no forced stop, avoids game pause bug)
     if cfg.AFK then
         if holding then
             local target, dist = nearestPlayer(nil)
@@ -384,79 +425,27 @@ RunService.Heartbeat:Connect(function(dt)
                 local oh = getHRP(target.Character)
                 if oh then
                     local shouldTeleport = bombTimer and bombTimer <= AFK_TELEPORT_THRESH
-                    if shouldTeleport or (cfg.BombTeleport) then
-                        -- Emergency teleport: snap ON TOP of target (Y+2) so we
-                        -- stay on arena floor instead of potentially landing outside
-                        local safePos = Vector3.new(
-                            oh.Position.X,
-                            oh.Position.Y + 2,
-                            oh.Position.Z)
-                        r.CFrame = CFrame.new(safePos, Vector3.new(
-                            oh.Position.X, safePos.Y, oh.Position.Z))
-                        -- No snap-back needed: landing on target means on arena
+                    if shouldTeleport then
+                        -- Snap on top of target — guaranteed on-arena, no edge risk
+                        r.CFrame = CFrame.new(
+                            Vector3.new(oh.Position.X, oh.Position.Y + 2, oh.Position.Z))
                     elseif dist > STOP_DIST then
-                        -- Doppelganger: mirror target's movement delta
-                        -- so we follow their path including jumps and direction changes
-                        if noFallBV then noFallBV.MaxForce = Vector3.new(0,0,0) end
-                        if doppelTarget ~= target then
-                            -- New target — reset mirror state
-                            doppelTarget  = target
-                            doppelPrevPos = oh.Position
-                        end
-                        if doppelPrevPos then
-                            local delta = oh.Position - doppelPrevPos
-                            -- Apply delta to our position (mirror movement)
-                            -- Cap delta magnitude to avoid rubber-banding on teleport
-                            if delta.Magnitude < 10 and delta.Magnitude > 0.01 then
-                                local newGoal = r.Position + delta
-                                h:MoveTo(newGoal)
-                                -- Mirror jump: if target jumped (Y delta > 1), jump too
-                                if delta.Y > 1 then
-                                    h:ChangeState(Enum.HumanoidStateType.Jumping)
-                                end
-                            else
-                                -- Target didn't move or teleported — fallback overshoot
-                                local d = Vector3.new(
-                                    oh.Position.X-r.Position.X, 0,
-                                    oh.Position.Z-r.Position.Z)
-                                h:MoveTo(oh.Position + d.Unit * 8)
-                            end
-                        end
-                        doppelPrevPos = oh.Position
+                        doppelMove(oh, dist)
                     end
                 end
             end
-        else
-            -- Not holding: stop moving, look natural
-            h:Move(Vector3.new(0,0,0), false)
         end
+        -- Not holding: intentionally do nothing — let natural physics handle idle
+        -- (h:Move(0,0,0) caused game-pause bug)
     end
 
-    -- Auto Pass Bomb (manual mode, independent of AFK)
-    -- Uses doppelganger movement: mirrors target delta so obstacles are handled
+    -- Auto Pass Bomb (manual, independent of AFK)
     if cfg.AutoPassBomb and not cfg.BombTeleport and not cfg.AFK and holding then
-        if noFallBV then noFallBV.MaxForce = Vector3.new(0,0,0) end
         local target, dist = nearestPlayer(nil)
         if target and target.Character then
             local oh = getHRP(target.Character)
             if oh and dist > STOP_DIST then
-                if doppelTarget ~= target then
-                    doppelTarget  = target
-                    doppelPrevPos = oh.Position
-                end
-                if doppelPrevPos then
-                    local delta = oh.Position - doppelPrevPos
-                    if delta.Magnitude < 10 and delta.Magnitude > 0.01 then
-                        h:MoveTo(r.Position + delta)
-                        if delta.Y > 1 then
-                            h:ChangeState(Enum.HumanoidStateType.Jumping)
-                        end
-                    else
-                        local d = Vector3.new(oh.Position.X-r.Position.X, 0, oh.Position.Z-r.Position.Z)
-                        h:MoveTo(oh.Position + d.Unit * 8)
-                    end
-                end
-                doppelPrevPos = oh.Position
+                doppelMove(oh, dist)
             end
         end
     end
