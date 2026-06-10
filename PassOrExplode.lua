@@ -187,6 +187,68 @@ local function setupNoFall(enable)
     noFallBV    = bv
 end
 
+-- Hitbox extender: invisible welded sensor part (CanTouch=true, CanCollide=false)
+-- Does NOT change HRP size so character visuals/physics stay intact
+local hitboxPart = nil
+local function setupHitbox(enable)
+    if hitboxPart then pcall(function() hitboxPart:Destroy() end); hitboxPart = nil end
+    -- Also restore bomb handle if we had it expanded
+    local c2 = getChar()
+    if c2 then
+        for _, v in ipairs(c2:GetChildren()) do
+            if v:IsA("Tool") then
+                local hnd = v:FindFirstChild("Handle")
+                if hnd and hnd:GetAttribute("OrigSize") then
+                    hnd.Size = hnd:GetAttribute("OrigSize")
+                    hnd:SetAttribute("OrigSize", nil)
+                end
+            end
+        end
+    end
+    if not enable then return end
+    local r2 = getHRP(c2); if not r2 then return end
+    local p = Instance.new("Part")
+    p.Name         = "HitboxSensor"
+    p.Size         = Vector3.new(HITBOX_SIZE, HITBOX_SIZE, HITBOX_SIZE)
+    p.Transparency = 1
+    p.CanCollide   = false
+    p.CanTouch     = true
+    p.Massless     = true
+    p.CFrame       = r2.CFrame
+    p.Parent       = c2
+    local w = Instance.new("WeldConstraint")
+    w.Part0 = r2; w.Part1 = p; w.Parent = p
+    hitboxPart = p
+end
+
+local function expandBombHandle(c2, size)
+    for _, v in ipairs(c2:GetChildren()) do
+        if v:IsA("Tool") then
+            local hnd = v:FindFirstChild("Handle")
+            if hnd then
+                if not hnd:GetAttribute("OrigSize") then
+                    hnd:SetAttribute("OrigSize", hnd.Size)
+                end
+                hnd.Size = Vector3.new(size, size, size)
+            end
+        end
+    end
+end
+
+local function restoreBombHandle(c2)
+    for _, v in ipairs(c2:GetChildren()) do
+        if v:IsA("Tool") then
+            local hnd = v:FindFirstChild("Handle")
+            if hnd and hnd:GetAttribute("OrigSize") then
+                hnd.Size = hnd:GetAttribute("OrigSize")
+                hnd:SetAttribute("OrigSize", nil)
+            end
+        end
+    end
+end
+
+local lastHolding = false
+
 local function firePunch(targetChar, targetHRP)
     if remoteAction then
         pcall(function() remoteAction:FireServer("Punch") end)
@@ -221,7 +283,7 @@ debugLabel.TextColor3             = Color3.fromRGB(100, 255, 100)
 debugLabel.TextSize               = 13
 debugLabel.Font                   = Enum.Font.Code
 debugLabel.TextXAlignment         = Enum.TextXAlignment.Left
-debugLabel.TextYAlignment            = Enum.TextYAlignment.Top
+debugLabel.TextYAlignment         = Enum.TextYAlignment.Top
 debugLabel.Text                   = "initializing..."
 debugLabel.BorderSizePixel        = 0
 debugLabel.Parent                 = debugGui
@@ -238,6 +300,16 @@ RunService.Heartbeat:Connect(function(dt)
     local holding = hasBomb(c)
     local chasing  = holding and (cfg.AutoPassBomb or cfg.BombTeleport)
 
+    -- Bomb handle expand/restore when hitbox extender is on
+    if cfg.HitboxEnabled then
+        if holding and not lastHolding then
+            expandBombHandle(c, HITBOX_SIZE)
+        elseif not holding and lastHolding then
+            restoreBombHandle(c)
+        end
+    end
+    lastHolding = holding
+
     -- Speed
     local targetSpd = SPEED_DEFAULT
     if cfg.SpeedEnabled then
@@ -251,12 +323,6 @@ RunService.Heartbeat:Connect(function(dt)
         if noclipTimer >= 0.3 then noclipTimer = 0; applyNoclip(c, true) end
     elseif ghostActive then
         applyNoclip(c, false); noclipTimer = 0
-    end
-
-    -- Hitbox extender: expand HRP collision box so bomb Touch fires further
-    if cfg.HitboxEnabled then
-        local sz = Vector3.new(HITBOX_SIZE, HITBOX_SIZE, HITBOX_SIZE)
-        if r.Size ~= sz then r.Size = sz end
     end
 
     -- Bomb Teleport
@@ -376,10 +442,7 @@ LocalPlayer.CharacterAdded:Connect(function()
     arenaYLocked = false; ySamples = {}; ySampleTimer = 0
     task.wait(1)
     if cfg.NoFall then setupNoFall(true) end
-    if cfg.HitboxEnabled then
-        local r2 = getHRP(getChar())
-        if r2 then r2.Size = Vector3.new(HITBOX_SIZE, HITBOX_SIZE, HITBOX_SIZE) end
-    end
+    if cfg.HitboxEnabled then setupHitbox(true) end
 end)
 
 -- ── UI: Bomb tab ──────────────────────────────────────────────────────────────
@@ -403,9 +466,9 @@ TabBomb:CreateSlider({ Name = "Stop Distance", Range = {2, 14}, Increment = 1, C
 TabBomb:CreateToggle({ Name = "Hitbox Extender", CurrentValue = false, Flag = "HitboxExt",
     Callback = function(v)
         cfg.HitboxEnabled = v
+        setupHitbox(v)
         if not v then
-            local r2 = getHRP(getChar())
-            if r2 then r2.Size = Vector3.new(2, 2, 1) end  -- restore default HRP size
+            local c2 = getChar(); if c2 then restoreBombHandle(c2) end
         end
     end })
 TabBomb:CreateSlider({ Name = "Hitbox Size", Range = {3, 20}, Increment = 1, CurrentValue = 5,
