@@ -25,6 +25,7 @@ local cfg = {
     SpeedEnabled = false,
     NoFall       = false,
     AutoPunch    = false,
+    HitboxEnabled = false,
 }
 
 -- ── Constants ─────────────────────────────────────────────────────────────────
@@ -33,7 +34,8 @@ local SPEED_IDLE      = 20
 local SPEED_DEFAULT   = 16
 local MAX_TARGET_DIST = 200
 local SPECTATOR_MARGIN = 12
-local STOP_DIST       = 4
+local STOP_DIST       = 6    -- raised: stop further from target, still in touch range
+local HITBOX_SIZE     = 5    -- HRP size when hitbox extender is on (default HRP ~2x2x1)
 local PUNCH_RANGE     = 6
 local PUNCH_RATE      = 0.45
 local PUNCH_Y_DIFF    = 15
@@ -251,6 +253,12 @@ RunService.Heartbeat:Connect(function(dt)
         applyNoclip(c, false); noclipTimer = 0
     end
 
+    -- Hitbox extender: expand HRP collision box so bomb Touch fires further
+    if cfg.HitboxEnabled then
+        local sz = Vector3.new(HITBOX_SIZE, HITBOX_SIZE, HITBOX_SIZE)
+        if r.Size ~= sz then r.Size = sz end
+    end
+
     -- Bomb Teleport
     if cfg.BombTeleport and holding then
         teleportTimer = teleportTimer + dt
@@ -368,6 +376,10 @@ LocalPlayer.CharacterAdded:Connect(function()
     arenaYLocked = false; ySamples = {}; ySampleTimer = 0
     task.wait(1)
     if cfg.NoFall then setupNoFall(true) end
+    if cfg.HitboxEnabled then
+        local r2 = getHRP(getChar())
+        if r2 then r2.Size = Vector3.new(HITBOX_SIZE, HITBOX_SIZE, HITBOX_SIZE) end
+    end
 end)
 
 -- ── UI: Bomb tab ──────────────────────────────────────────────────────────────
@@ -386,6 +398,18 @@ TabBomb:CreateToggle({ Name = "Speed Boost", CurrentValue = false, Flag = "Speed
     Callback = function(v) cfg.SpeedEnabled = v end })
 TabBomb:CreateSlider({ Name = "Bomb Speed", Range = {16, 40}, Increment = 1, CurrentValue = 22,
     Flag = "BombSpeed", Callback = function(v) SPEED_BOMB = v end })
+TabBomb:CreateSlider({ Name = "Stop Distance", Range = {2, 14}, Increment = 1, CurrentValue = 6,
+    Flag = "StopDist", Callback = function(v) STOP_DIST = v end })
+TabBomb:CreateToggle({ Name = "Hitbox Extender", CurrentValue = false, Flag = "HitboxExt",
+    Callback = function(v)
+        cfg.HitboxEnabled = v
+        if not v then
+            local r2 = getHRP(getChar())
+            if r2 then r2.Size = Vector3.new(2, 2, 1) end  -- restore default HRP size
+        end
+    end })
+TabBomb:CreateSlider({ Name = "Hitbox Size", Range = {3, 20}, Increment = 1, CurrentValue = 5,
+    Flag = "HitboxSize", Callback = function(v) HITBOX_SIZE = v end })
 TabBomb:CreateSlider({ Name = "Idle Speed", Range = {16, 30}, Increment = 1, CurrentValue = 20,
     Flag = "IdleSpeed", Callback = function(v) SPEED_IDLE = v end })
 
