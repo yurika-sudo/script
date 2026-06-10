@@ -132,18 +132,19 @@ task.spawn(function()
 
     for _, t in ipairs(targets) do
         local remote, name, args = t[1], t[2], t[3]
-        if not remote then continue end
-        local ok = pcall(function() remote:FireServer(table.unpack(args)) end)
-        task.wait(0.5)
-        local coinsAfter = getCoins()
-        local delta = coinsAfter and coinsBefore and (coinsAfter - coinsBefore) or 0
-        if delta > 0 then
-            logOk(name.."("..table.concat(args,",")..") → COINS CHANGED by +"..delta.." !! VULN CONFIRMED")
-            coinsBefore = coinsAfter
-        else
-            log(name.."("..table.concat(args,",")..") → no effect", Color3.fromRGB(150,150,150))
+        if remote then
+            local ok = pcall(function() remote:FireServer(table.unpack(args)) end)
+            task.wait(0.5)
+            local coinsAfter = getCoins()
+            local delta = coinsAfter and coinsBefore and (coinsAfter - coinsBefore) or 0
+            if delta > 0 then
+                logOk(name.."("..table.concat(args,",")..") COINS +"..delta.." VULN CONFIRMED")
+                coinsBefore = coinsAfter
+            else
+                log(name.."("..table.concat(args,",")..") no effect", Color3.fromRGB(150,150,150))
+            end
+            task.wait(0.3)
         end
-        task.wait(0.3)
     end
 
     local coinsAfterAll = getCoins()
@@ -234,21 +235,22 @@ task.spawn(function()
 
     for _, name in ipairs({"TrainingEvent","QuestEvent"}) do
         local remote = events and events:FindFirstChild(name)
-        if not remote then log(name..": not found", Color3.fromRGB(150,150,150)); continue end
-
-        local coinsBefore = getCoins()
-        -- Try to claim/complete without doing the actual task
-        local args = {{"claim"},{"complete"},{"finish"},{"Complete"},{"Claim"},{action="complete"}}
-        for _, a in ipairs(args) do
-            pcall(function() remote:FireServer(table.unpack(a)) end)
-            task.wait(0.5)
-        end
-        local coinsAfter = getCoins()
-        local delta = coinsAfter and coinsBefore and (coinsAfter - coinsBefore) or 0
-        if delta > 0 then
-            logOk(name.." → coins changed +"..delta.." !! POTENTIAL VULN")
+        if not remote then
+            log(name..": not found", Color3.fromRGB(150,150,150))
         else
-            log(name..": no measurable effect", Color3.fromRGB(150,150,150))
+            local coinsBefore = getCoins()
+            local args = {{"claim"},{"complete"},{"finish"},{"Complete"},{"Claim"}}
+            for _, a in ipairs(args) do
+                pcall(function() remote:FireServer(table.unpack(a)) end)
+                task.wait(0.5)
+            end
+            local coinsAfter = getCoins()
+            local delta = coinsAfter and coinsBefore and (coinsAfter - coinsBefore) or 0
+            if delta > 0 then
+                logOk(name.." coins +"..delta.." POTENTIAL VULN")
+            else
+                log(name..": no measurable effect", Color3.fromRGB(150,150,150))
+            end
         end
     end
 end)
