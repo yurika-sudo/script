@@ -1,9 +1,17 @@
 local RunService = game:GetService("RunService")
 local Lighting = game:GetService("Lighting")
 local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
 local lp = Players.LocalPlayer
 
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+
+-- ============================================================
+-- Config persistence (save/load state.* to a file)
+-- ============================================================
+local CONFIG_FOLDER = "TickOptimizer"
+local CONFIG_FILE = CONFIG_FOLDER .. "/config.json"
+local FILE_API_OK = writefile and readfile and isfile and isfolder and makefolder
 
 local state = {
 	graphics = false,
@@ -16,12 +24,109 @@ local state = {
 	partCullRange = 100,
 	playerCull = false,
 	playerCullRange = 60,
+	-- How many times per second the distance-based culling loops
+	-- (billboards / partCull / playerCull) re-check distances.
+	-- Lower = cheaper, higher = more responsive.
+	cullRate = 5,
 }
 
-local heartbeatConn = nil
-local partCullConn = nil
-local playerCullConn = nil
+local function saveConfig()
+	if not FILE_API_OK then return end
+	pcall(function()
+		if not isfolder(CONFIG_FOLDER) then
+			makefolder(CONFIG_FOLDER)
+		end
+		writefile(CONFIG_FILE, HttpService:JSONEncode(state))
+	end)
+end
 
+local function loadConfig()
+	if not FILE_API_OK then return end
+	pcall(function()
+		if isfile(CONFIG_FILE) then
+			local saved = HttpService:JSONDecode(readfile(CONFIG_FILE))
+			for k, v in pairs(saved) do
+				if state[k] ~= nil then
+					state[k] = v
+				end
+			end
+		end
+	end)
+end
+
+-- Load saved values BEFORE UI is built so toggles/sliders show
+-- the correct CurrentValue on startup.
+loadConfig()
+
+-- ============================================================
+-- Connections & caches
+-- ============================================================
+local heartbeatConn = nil          -- billboard cull heartbeat
+local billboardAddedConn = nil
+local billboardRemovingConn = nil
+local billboardCache = {}          -- [BillboardGui] = parentBasePart
+
+local partCullConn = nil           -- part cull heartbeat
+local partAddedConn = nil
+local partRemovingConn = nil
+local partCullCache = {}           -- [BasePart] = true
+
+local playerCullConn = nil         -- player cull heartbeat
+
+-- ============================================================
+-- Cache helpers (built once, maintained incrementally)
+-- ============================================================
+local function billboardCacheAdd(obj)
+	if obj:IsA("BillboardGui") then
+		local p = obj.Parent
+		if p and p:IsA("BasePart") then
+			billboardCache[obj] = p
+		end
+	end
+end
+
+local function rebuildBillboardCache()
+	billboardCache = {}
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		billboardCacheAdd(obj)
+	end
+end
+
+local function isLocalCharacterPart(obj)
+	local char = lp.Character
+	return char ~= nil and obj:IsDescendantOf(char)
+end
+
+local function partCacheAdd(obj)
+	if obj:IsA("BasePart") and not isLocalCharacterPart(obj) then
+		partCullCache[obj] = true
+	end
+end
+
+local function rebuildPartCullCache()
+	partCullCache = {}
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		partCacheAdd(obj)
+	end
+end
+
+-- When the local player respawns, their new character's parts may briefly
+-- get added to the part-cull cache before lp.Character updates. Strip them
+-- out so the player doesn't get culled/transparent right after respawn.
+lp.CharacterAdded:Connect(function(char)
+	if not state.partCull then return end
+	task.wait(0.1)
+	for _, obj in ipairs(char:GetDescendants()) do
+		if obj:IsA("BasePart") and partCullCache[obj] then
+			partCullCache[obj] = nil
+			obj.LocalTransparencyModifier = 0
+		end
+	end
+end)
+
+-- ============================================================
+-- Apply functions
+-- ============================================================
 local function applyGraphics(enabled)
 	if enabled then
 		settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
@@ -75,67 +180,108 @@ local function applyShadows(enabled)
 	end
 end
 
+-- Billboard distance cull: cache BillboardGui+part pairs once, maintain via
+-- DescendantAdded/Removing, and only re-check distances at state.cullRate
+-- times per second instead of every single frame.
 local function applyBillboards(enabled)
-	if heartbeatConn then
-		heartbeatConn:Disconnect()
-		heartbeatConn = nil
-	end
+	if heartbeatConn then heartbeatConn:Disconnect(); heartbeatConn = nil end
+	if billboardAddedConn then billboardAddedConn:Disconnect(); billboardAddedConn = nil end
+	if billboardRemovingConn then billboardRemovingConn:Disconnect(); billboardRemovingConn = nil end
+
 	if not enabled then
-		for _, obj in ipairs(workspace:GetDescendants()) do
-			if obj:IsA("BillboardGui") then
-				obj.Enabled = true
+		for gui in pairs(billboardCache) do
+			if gui.Parent then
+				gui.Enabled = true
 			end
 		end
+		billboardCache = {}
 		return
 	end
-	heartbeatConn = RunService.Heartbeat:Connect(function()
+
+	rebuildBillboardCache()
+
+	billboardAddedConn = workspace.DescendantAdded:Connect(billboardCacheAdd)
+	billboardRemovingConn = workspace.DescendantRemoving:Connect(function(obj)
+		billboardCache[obj] = nil
+	end)
+
+	local acc = 0
+	heartbeatConn = RunService.Heartbeat:Connect(function(dt)
+		acc += dt
+		if acc < (1 / state.cullRate) then return end
+		acc = 0
+
 		local char = lp.Character
 		if not char then return end
 		local hrp = char:FindFirstChild("HumanoidRootPart")
 		if not hrp then return end
-		for _, obj in ipairs(workspace:GetDescendants()) do
-			if obj:IsA("BillboardGui") then
-				local p = obj.Parent
-				if p and p:IsA("BasePart") then
-					obj.Enabled = (p.Position - hrp.Position).Magnitude < state.billboardRange
-				end
+		local hrpPos = hrp.Position
+		local range = state.billboardRange
+
+		for gui, part in pairs(billboardCache) do
+			if gui.Parent and part.Parent then
+				gui.Enabled = (part.Position - hrpPos).Magnitude < range
+			else
+				billboardCache[gui] = nil
 			end
 		end
 	end)
 end
 
+-- Part distance cull: cache non-character BaseParts once, maintain via
+-- DescendantAdded/Removing, and only re-check distances at state.cullRate
+-- times per second instead of scanning the whole workspace every frame.
 local function applyPartCull(enabled)
-	if partCullConn then
-		partCullConn:Disconnect()
-		partCullConn = nil
-	end
+	if partCullConn then partCullConn:Disconnect(); partCullConn = nil end
+	if partAddedConn then partAddedConn:Disconnect(); partAddedConn = nil end
+	if partRemovingConn then partRemovingConn:Disconnect(); partRemovingConn = nil end
+
 	if not enabled then
-		for _, obj in ipairs(workspace:GetDescendants()) do
-			if obj:IsA("BasePart") and not obj:IsDescendantOf(lp.Character or game) then
+		for obj in pairs(partCullCache) do
+			if obj.Parent then
 				obj.LocalTransparencyModifier = 0
 			end
 		end
+		partCullCache = {}
 		return
 	end
-	partCullConn = RunService.Heartbeat:Connect(function()
+
+	rebuildPartCullCache()
+
+	partAddedConn = workspace.DescendantAdded:Connect(partCacheAdd)
+	partRemovingConn = workspace.DescendantRemoving:Connect(function(obj)
+		partCullCache[obj] = nil
+	end)
+
+	local acc = 0
+	partCullConn = RunService.Heartbeat:Connect(function(dt)
+		acc += dt
+		if acc < (1 / state.cullRate) then return end
+		acc = 0
+
 		local char = lp.Character
 		if not char then return end
 		local hrp = char:FindFirstChild("HumanoidRootPart")
 		if not hrp then return end
-		for _, obj in ipairs(workspace:GetDescendants()) do
-			if obj:IsA("BasePart") and not obj:IsDescendantOf(char) then
-				local dist = (obj.Position - hrp.Position).Magnitude
-				obj.LocalTransparencyModifier = dist > state.partCullRange and 1 or 0
+		local hrpPos = hrp.Position
+		local range = state.partCullRange
+
+		for obj in pairs(partCullCache) do
+			if obj.Parent then
+				local dist = (obj.Position - hrpPos).Magnitude
+				obj.LocalTransparencyModifier = dist > range and 1 or 0
+			else
+				partCullCache[obj] = nil
 			end
 		end
 	end)
 end
 
+-- Player distance cull: logic unchanged, just throttled to state.cullRate
+-- times per second instead of every frame.
 local function applyPlayerCull(enabled)
-	if playerCullConn then
-		playerCullConn:Disconnect()
-		playerCullConn = nil
-	end
+	if playerCullConn then playerCullConn:Disconnect(); playerCullConn = nil end
+
 	if not enabled then
 		for _, player in ipairs(Players:GetPlayers()) do
 			if player ~= lp and player.Character then
@@ -148,17 +294,26 @@ local function applyPlayerCull(enabled)
 		end
 		return
 	end
-	playerCullConn = RunService.Heartbeat:Connect(function()
+
+	local acc = 0
+	playerCullConn = RunService.Heartbeat:Connect(function(dt)
+		acc += dt
+		if acc < (1 / state.cullRate) then return end
+		acc = 0
+
 		local char = lp.Character
 		if not char then return end
 		local hrp = char:FindFirstChild("HumanoidRootPart")
 		if not hrp then return end
+		local hrpPos = hrp.Position
+		local range = state.playerCullRange
+
 		for _, player in ipairs(Players:GetPlayers()) do
 			if player ~= lp and player.Character then
 				local otherHRP = player.Character:FindFirstChild("HumanoidRootPart")
 				if otherHRP then
-					local dist = (otherHRP.Position - hrp.Position).Magnitude
-					local hide = dist > state.playerCullRange
+					local dist = (otherHRP.Position - hrpPos).Magnitude
+					local hide = dist > range
 					for _, obj in ipairs(player.Character:GetDescendants()) do
 						if obj:IsA("BasePart") then
 							obj.LocalTransparencyModifier = hide and 1 or 0
@@ -170,48 +325,51 @@ local function applyPlayerCull(enabled)
 	end)
 end
 
+-- ============================================================
+-- Presets (drive everything through Rayfield.Flags so the UI
+-- and the saved config stay in sync with the actual state)
+-- ============================================================
 local function setPreset(mode)
+	local cfg
 	if mode == "Performance" then
-		state.graphics = true
-		state.particles = true
-		state.decals = true
-		state.shadows = true
-		state.billboards = true
-		state.billboardRange = 40
-		state.partCull = true
-		state.partCullRange = 60
-		state.playerCull = true
-		state.playerCullRange = 40
+		cfg = {
+			graphics = true, particles = true, decals = true, shadows = true,
+			billboards = true, billboardRange = 40,
+			partCull = true, partCullRange = 60,
+			playerCull = true, playerCullRange = 40,
+		}
 	elseif mode == "Balanced" then
-		state.graphics = true
-		state.particles = true
-		state.decals = false
-		state.shadows = true
-		state.billboards = true
-		state.billboardRange = 80
-		state.partCull = false
-		state.partCullRange = 100
-		state.playerCull = true
-		state.playerCullRange = 60
+		cfg = {
+			graphics = true, particles = true, decals = false, shadows = true,
+			billboards = true, billboardRange = 80,
+			partCull = false, partCullRange = 100,
+			playerCull = true, playerCullRange = 60,
+		}
 	elseif mode == "Quality" then
-		state.graphics = true
-		state.particles = false
-		state.decals = false
-		state.shadows = true
-		state.billboards = false
-		state.billboardRange = 80
-		state.partCull = false
-		state.partCullRange = 100
-		state.playerCull = false
-		state.playerCullRange = 60
+		cfg = {
+			graphics = true, particles = false, decals = false, shadows = true,
+			billboards = false, billboardRange = 80,
+			partCull = false, partCullRange = 100,
+			playerCull = false, playerCullRange = 60,
+		}
+	else
+		return
 	end
-	applyGraphics(state.graphics)
-	applyParticles(state.particles)
-	applyDecals(state.decals)
-	applyShadows(state.shadows)
-	applyBillboards(state.billboards)
-	applyPartCull(state.partCull)
-	applyPlayerCull(state.playerCull)
+
+	-- Ranges first so the toggle callbacks below read the right values.
+	Rayfield.Flags["billboardRange"]:Set(cfg.billboardRange)
+	Rayfield.Flags["partCullRange"]:Set(cfg.partCullRange)
+	Rayfield.Flags["playerCullRange"]:Set(cfg.playerCullRange)
+
+	Rayfield.Flags["graphics"]:Set(cfg.graphics)
+	Rayfield.Flags["particles"]:Set(cfg.particles)
+	Rayfield.Flags["decals"]:Set(cfg.decals)
+	Rayfield.Flags["shadows"]:Set(cfg.shadows)
+	Rayfield.Flags["billboards"]:Set(cfg.billboards)
+	Rayfield.Flags["partCull"]:Set(cfg.partCull)
+	Rayfield.Flags["playerCull"]:Set(cfg.playerCull)
+
+	saveConfig()
 end
 
 workspace.DescendantAdded:Connect(function(obj)
@@ -288,20 +446,17 @@ PresetTab:CreateButton({
 	Name = "Reset  —  Back to default",
 	Description = "Turns off all optimizations and restores the game to its original state.",
 	Callback = function()
-		state.graphics = false
-		state.particles = false
-		state.decals = false
-		state.shadows = false
-		state.billboards = false
-		state.partCull = false
-		state.playerCull = false
-		applyGraphics(false)
-		applyParticles(false)
-		applyDecals(false)
-		applyShadows(false)
-		applyBillboards(false)
-		applyPartCull(false)
-		applyPlayerCull(false)
+		Rayfield.Flags["billboardRange"]:Set(80)
+		Rayfield.Flags["partCullRange"]:Set(100)
+		Rayfield.Flags["playerCullRange"]:Set(60)
+		Rayfield.Flags["graphics"]:Set(false)
+		Rayfield.Flags["particles"]:Set(false)
+		Rayfield.Flags["decals"]:Set(false)
+		Rayfield.Flags["shadows"]:Set(false)
+		Rayfield.Flags["billboards"]:Set(false)
+		Rayfield.Flags["partCull"]:Set(false)
+		Rayfield.Flags["playerCull"]:Set(false)
+		saveConfig()
 		Rayfield:Notify({ Title = "Reset", Content = "All optimizations off", Duration = 3 })
 	end,
 })
@@ -311,44 +466,48 @@ MainTab:CreateSection("Basic")
 MainTab:CreateToggle({
 	Name = "Graphics Nuke",
 	Description = "Forces graphics to the lowest level and disables all lighting effects (blur, bloom, sun rays). Safe on any game.",
-	CurrentValue = false,
+	CurrentValue = state.graphics,
 	Flag = "graphics",
 	Callback = function(val)
 		state.graphics = val
 		applyGraphics(val)
+		saveConfig()
 	end,
 })
 
 MainTab:CreateToggle({
 	Name = "Remove Particles & Trails",
 	Description = "Disables particle effects, smoke, fire, sparkles, and character trails. Visual effects disappear but gameplay is unaffected.",
-	CurrentValue = false,
+	CurrentValue = state.particles,
 	Flag = "particles",
 	Callback = function(val)
 		state.particles = val
 		applyParticles(val)
+		saveConfig()
 	end,
 })
 
 MainTab:CreateToggle({
 	Name = "Hide Decals & Textures",
 	Description = "Hides images and textures applied to objects. Map will look plain but gives a significant FPS boost in tile/keyboard games.",
-	CurrentValue = false,
+	CurrentValue = state.decals,
 	Flag = "decals",
 	Callback = function(val)
 		state.decals = val
 		applyDecals(val)
+		saveConfig()
 	end,
 })
 
 MainTab:CreateToggle({
 	Name = "Disable Shadows",
 	Description = "Removes shadows from all objects. One of the most impactful toggles for FPS on low-end devices.",
-	CurrentValue = false,
+	CurrentValue = state.shadows,
 	Flag = "shadows",
 	Callback = function(val)
 		state.shadows = val
 		applyShadows(val)
+		saveConfig()
 	end,
 })
 
@@ -357,11 +516,12 @@ MainTab:CreateSection("Advanced")
 MainTab:CreateToggle({
 	Name = "Billboard Distance Cull",
 	Description = "Hides floating text and 3D labels (player names, leaderboards) that are far from your character. Adjust the range with the slider below.",
-	CurrentValue = false,
+	CurrentValue = state.billboards,
 	Flag = "billboards",
 	Callback = function(val)
 		state.billboards = val
 		applyBillboards(val)
+		saveConfig()
 	end,
 })
 
@@ -371,21 +531,23 @@ MainTab:CreateSlider({
 	Range = {20, 200},
 	Increment = 10,
 	Suffix = " studs",
-	CurrentValue = 80,
+	CurrentValue = state.billboardRange,
 	Flag = "billboardRange",
 	Callback = function(val)
 		state.billboardRange = val
+		saveConfig()
 	end,
 })
 
 MainTab:CreateToggle({
 	Name = "Player Distance Cull",
 	Description = "Hides other players' characters beyond a set range. Very effective on crowded servers since each player has trails, particles, and mesh parts.",
-	CurrentValue = false,
+	CurrentValue = state.playerCull,
 	Flag = "playerCull",
 	Callback = function(val)
 		state.playerCull = val
 		applyPlayerCull(val)
+		saveConfig()
 	end,
 })
 
@@ -395,10 +557,25 @@ MainTab:CreateSlider({
 	Range = {20, 200},
 	Increment = 10,
 	Suffix = " studs",
-	CurrentValue = 60,
+	CurrentValue = state.playerCullRange,
 	Flag = "playerCullRange",
 	Callback = function(val)
 		state.playerCullRange = val
+		saveConfig()
+	end,
+})
+
+MainTab:CreateSlider({
+	Name = "Cull Update Rate",
+	Description = "How many times per second billboard/part/player distance checks run. Lower = less CPU overhead, higher = more responsive culling. 5 is a good default.",
+	Range = {2, 10},
+	Increment = 1,
+	Suffix = " Hz",
+	CurrentValue = state.cullRate,
+	Flag = "cullRate",
+	Callback = function(val)
+		state.cullRate = val
+		saveConfig()
 	end,
 })
 
@@ -407,11 +584,12 @@ MainTab:CreateSection("Keyboard / Tile Game Only")
 MainTab:CreateToggle({
 	Name = "Part Distance Cull",
 	Description = "Hides tiles and objects far from your character. Very effective in keyboard simulators since hundreds of tiles keep rendering even off-screen.",
-	CurrentValue = false,
+	CurrentValue = state.partCull,
 	Flag = "partCull",
 	Callback = function(val)
 		state.partCull = val
 		applyPartCull(val)
+		saveConfig()
 	end,
 })
 
@@ -421,10 +599,11 @@ MainTab:CreateSlider({
 	Range = {20, 300},
 	Increment = 10,
 	Suffix = " studs",
-	CurrentValue = 100,
+	CurrentValue = state.partCullRange,
 	Flag = "partCullRange",
 	Callback = function(val)
 		state.partCullRange = val
+		saveConfig()
 	end,
 })
 
@@ -478,5 +657,36 @@ DebugTab:CreateButton({
 			end
 		end)
 		debugLabel:Set({ Title = "FPS Result", Content = "Sampling... (wait ~1s)" })
+	end,
+})
+
+DebugTab:CreateButton({
+	Name = "Save Settings Now",
+	Description = "Manually saves the current configuration. Settings also auto-save whenever you change a toggle, slider, or preset.",
+	Callback = function()
+		if not FILE_API_OK then
+			debugLabel:Set({ Title = "Save Settings", Content = "File API (writefile/readfile/isfile/isfolder/makefolder) not available on this executor. Settings won't persist between sessions." })
+			return
+		end
+		saveConfig()
+		debugLabel:Set({ Title = "Save Settings", Content = "Saved to: " .. CONFIG_FILE })
+	end,
+})
+
+DebugTab:CreateButton({
+	Name = "Show Config Path",
+	Description = "Shows where the saved configuration file lives and whether it currently exists.",
+	Callback = function()
+		if not FILE_API_OK then
+			debugLabel:Set({ Title = "Config Path", Content = "File API not available on this executor — config won't be saved." })
+			return
+		end
+		local exists = isfile(CONFIG_FILE)
+		debugLabel:Set({
+			Title = "Config Path",
+			Content = "Relative path: " .. CONFIG_FILE
+				.. "\nExists: " .. tostring(exists)
+				.. "\nThis is inside your executor's workspace/files folder (e.g. .../<executor>/workspace/" .. CONFIG_FILE .. ")",
+		})
 	end,
 })
