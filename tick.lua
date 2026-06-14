@@ -476,22 +476,21 @@ local function setPreset(mode)
 	applyPartCull(cfg.partCull)
 	applyPlayerCull(cfg.playerCull)
 
-	-- sync Rayfield UI to reflect new values (best-effort; pcall so failures
-	-- don't abort the preset — actual state is already applied above)
-	pcall(function()
-		Rayfield.Flags["billboardRange"]:Set(cfg.billboardRange)
-		Rayfield.Flags["partCullRange"]:Set(cfg.partCullRange)
-		Rayfield.Flags["playerCullRange"]:Set(cfg.playerCullRange)
-		Rayfield.Flags["graphics"]:Set(cfg.graphics)
-		Rayfield.Flags["particles"]:Set(cfg.particles)
-		Rayfield.Flags["decals"]:Set(cfg.decals)
-		Rayfield.Flags["shadows"]:Set(cfg.shadows)
-		Rayfield.Flags["billboards"]:Set(cfg.billboards)
-		Rayfield.Flags["partCull"]:Set(cfg.partCull)
-		Rayfield.Flags["playerCull"]:Set(cfg.playerCull)
-		Rayfield.Flags["renderDistance"]:Set(cfg.renderDistance)
-		Rayfield.Flags["textureQuality"]:Set(cfg.textureQuality)
-	end)
+	-- sync UI toggles/sliders; each flag wrapped individually so one executor
+	-- quirk can't silently block the rest from updating
+	local function flagSet(key, val) pcall(function() Rayfield.Flags[key]:Set(val) end) end
+	flagSet("billboardRange",  cfg.billboardRange)
+	flagSet("partCullRange",   cfg.partCullRange)
+	flagSet("playerCullRange", cfg.playerCullRange)
+	flagSet("graphics",        cfg.graphics)
+	flagSet("particles",       cfg.particles)
+	flagSet("decals",          cfg.decals)
+	flagSet("shadows",         cfg.shadows)
+	flagSet("billboards",      cfg.billboards)
+	flagSet("partCull",        cfg.partCull)
+	flagSet("playerCull",      cfg.playerCull)
+	flagSet("renderDistance",  cfg.renderDistance)
+	flagSet("textureQuality",  cfg.textureQuality)
 
 	saveConfig()
 	refreshPresetStatus()
@@ -546,20 +545,19 @@ PresetTab:CreateButton({
 		applyPartCull(false)
 		applyPlayerCull(false)
 
-		pcall(function()
-			Rayfield.Flags["billboardRange"]:Set(DEFAULT_STATE.billboardRange)
-			Rayfield.Flags["partCullRange"]:Set(DEFAULT_STATE.partCullRange)
-			Rayfield.Flags["playerCullRange"]:Set(DEFAULT_STATE.playerCullRange)
-			Rayfield.Flags["graphics"]:Set(false)
-			Rayfield.Flags["particles"]:Set(false)
-			Rayfield.Flags["decals"]:Set(false)
-			Rayfield.Flags["shadows"]:Set(false)
-			Rayfield.Flags["billboards"]:Set(false)
-			Rayfield.Flags["partCull"]:Set(false)
-			Rayfield.Flags["playerCull"]:Set(false)
-			Rayfield.Flags["renderDistance"]:Set(false)
-			Rayfield.Flags["textureQuality"]:Set(false)
-		end)
+		local function flagSet(key, val) pcall(function() Rayfield.Flags[key]:Set(val) end) end
+		flagSet("billboardRange",  DEFAULT_STATE.billboardRange)
+		flagSet("partCullRange",   DEFAULT_STATE.partCullRange)
+		flagSet("playerCullRange", DEFAULT_STATE.playerCullRange)
+		flagSet("graphics",        false)
+		flagSet("particles",       false)
+		flagSet("decals",          false)
+		flagSet("shadows",         false)
+		flagSet("billboards",      false)
+		flagSet("partCull",        false)
+		flagSet("playerCull",      false)
+		flagSet("renderDistance",  false)
+		flagSet("textureQuality",  false)
 
 		saveConfig()
 		refreshPresetStatus()
@@ -821,20 +819,25 @@ DebugTab:CreateButton({
 
 DebugTab:CreateButton({
 	Name        = "Ping Check",
-	Description = "Measures round-trip latency to the server over 10 samples (~2s).",
+	Description = "Samples server ping over ~8s (waits for value changes to get real min/max spread).",
 	Callback = function()
-		debugLabel:Set({ Title = "Ping Check", Content = "Sampling..." })
+		debugLabel:Set({ Title = "Ping Check", Content = "Sampling... (~8s)" })
 		local stats = game:GetService("Stats")
 		local samples, conn = {}, nil
 		local elapsed = 0
+		local lastVal = nil
+		-- Data Ping updates ~1/s so we run for 8s and only record on value change;
+		-- this gives a real spread for min/max instead of 10 identical readings
 		conn = RunService.Heartbeat:Connect(function(dt)
 			elapsed += dt
-			-- Stats.Network.ServerStatsItem["Data Ping"] gives the current ping in ms
 			local ok, ping = pcall(function()
 				return stats.Network.ServerStatsItem["Data Ping"]:GetValue()
 			end)
-			if ok then table.insert(samples, ping) end
-			if elapsed >= 2 or #samples >= 10 then
+			if ok and ping ~= lastVal then
+				lastVal = ping
+				table.insert(samples, ping)
+			end
+			if elapsed >= 8 then
 				conn:Disconnect()
 				if #samples == 0 then
 					debugLabel:Set({ Title = "Ping Check", Content = "Ping data unavailable on this server." })
@@ -849,7 +852,7 @@ DebugTab:CreateButton({
 				local avg = math.floor(sum / #samples)
 				debugLabel:Set({
 					Title   = "Ping Check",
-					Content = "Avg: " .. avg .. " ms  |  Min: " .. math.floor(mn) .. "  Max: " .. math.floor(mx) .. "\n(" .. #samples .. " samples)",
+					Content = "Avg: " .. avg .. " ms  |  Min: " .. math.floor(mn) .. "  Max: " .. math.floor(mx) .. "\n(" .. #samples .. " unique readings over 8s)",
 				})
 			end
 		end)
