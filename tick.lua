@@ -439,26 +439,56 @@ local function refreshPresetStatus()
 	presetStatusLabel:Set({ Title = "Active Profile", Content = msg })
 end
 
--- central function: push a preset config into Rayfield flags (which triggers
--- each toggle/slider callback, so apply* functions always get called)
+-- Apply preset directly without going through Rayfield.Flags:Set — avoids
+-- callback errors from Rayfield flag timing issues on some executors.
+-- State is updated first so any running heartbeat loops pick up new values
+-- immediately; then apply* fns are called to push changes to the game.
 local function setPreset(mode)
 	local cfg = PRESETS[mode]
 	if not cfg then return end
 
-	-- ranges before booleans so callbacks read correct range values
-	Rayfield.Flags["billboardRange"]:Set(cfg.billboardRange)
-	Rayfield.Flags["partCullRange"]:Set(cfg.partCullRange)
-	Rayfield.Flags["playerCullRange"]:Set(cfg.playerCullRange)
+	-- update state table first (ranges before booleans — heartbeats read ranges)
+	state.billboardRange  = cfg.billboardRange
+	state.partCullRange   = cfg.partCullRange
+	state.playerCullRange = cfg.playerCullRange
 
-	Rayfield.Flags["graphics"]:Set(cfg.graphics)
-	Rayfield.Flags["particles"]:Set(cfg.particles)
-	Rayfield.Flags["decals"]:Set(cfg.decals)
-	Rayfield.Flags["shadows"]:Set(cfg.shadows)
-	Rayfield.Flags["billboards"]:Set(cfg.billboards)
-	Rayfield.Flags["partCull"]:Set(cfg.partCull)
-	Rayfield.Flags["playerCull"]:Set(cfg.playerCull)
-	Rayfield.Flags["renderDistance"]:Set(cfg.renderDistance)
-	Rayfield.Flags["textureQuality"]:Set(cfg.textureQuality)
+	state.graphics       = cfg.graphics
+	state.particles      = cfg.particles
+	state.decals         = cfg.decals
+	state.shadows        = cfg.shadows
+	state.billboards     = cfg.billboards
+	state.partCull       = cfg.partCull
+	state.playerCull     = cfg.playerCull
+	state.renderDistance = cfg.renderDistance
+	state.textureQuality = cfg.textureQuality
+
+	-- call apply functions directly
+	applyGraphics(cfg.graphics)
+	applyTextureQuality(cfg.textureQuality)
+	applyRenderDistance(cfg.renderDistance)
+	applyParticles(cfg.particles)
+	applyDecals(cfg.decals)
+	applyShadows(cfg.shadows)
+	applyBillboards(cfg.billboards)
+	applyPartCull(cfg.partCull)
+	applyPlayerCull(cfg.playerCull)
+
+	-- sync Rayfield UI to reflect new values (best-effort; pcall so failures
+	-- don't abort the preset — actual state is already applied above)
+	pcall(function()
+		Rayfield.Flags["billboardRange"]:Set(cfg.billboardRange)
+		Rayfield.Flags["partCullRange"]:Set(cfg.partCullRange)
+		Rayfield.Flags["playerCullRange"]:Set(cfg.playerCullRange)
+		Rayfield.Flags["graphics"]:Set(cfg.graphics)
+		Rayfield.Flags["particles"]:Set(cfg.particles)
+		Rayfield.Flags["decals"]:Set(cfg.decals)
+		Rayfield.Flags["shadows"]:Set(cfg.shadows)
+		Rayfield.Flags["billboards"]:Set(cfg.billboards)
+		Rayfield.Flags["partCull"]:Set(cfg.partCull)
+		Rayfield.Flags["playerCull"]:Set(cfg.playerCull)
+		Rayfield.Flags["renderDistance"]:Set(cfg.renderDistance)
+		Rayfield.Flags["textureQuality"]:Set(cfg.textureQuality)
+	end)
 
 	saveConfig()
 	refreshPresetStatus()
@@ -501,19 +531,33 @@ PresetTab:CreateButton({
 	Name        = "Reset to Default",
 	Description = "Disables all optimizations and restores game to its original state.",
 	Callback = function()
-		-- restore Rayfield flags to defaults, which triggers each callback
-		Rayfield.Flags["billboardRange"]:Set(DEFAULT_STATE.billboardRange)
-		Rayfield.Flags["partCullRange"]:Set(DEFAULT_STATE.partCullRange)
-		Rayfield.Flags["playerCullRange"]:Set(DEFAULT_STATE.playerCullRange)
-		Rayfield.Flags["graphics"]:Set(false)
-		Rayfield.Flags["particles"]:Set(false)
-		Rayfield.Flags["decals"]:Set(false)
-		Rayfield.Flags["shadows"]:Set(false)
-		Rayfield.Flags["billboards"]:Set(false)
-		Rayfield.Flags["partCull"]:Set(false)
-		Rayfield.Flags["playerCull"]:Set(false)
-		Rayfield.Flags["renderDistance"]:Set(false)
-		Rayfield.Flags["textureQuality"]:Set(false)
+		for k, v in pairs(DEFAULT_STATE) do state[k] = v end
+
+		applyGraphics(false)
+		applyTextureQuality(false)
+		applyRenderDistance(false)
+		applyParticles(false)
+		applyDecals(false)
+		applyShadows(false)
+		applyBillboards(false)
+		applyPartCull(false)
+		applyPlayerCull(false)
+
+		pcall(function()
+			Rayfield.Flags["billboardRange"]:Set(DEFAULT_STATE.billboardRange)
+			Rayfield.Flags["partCullRange"]:Set(DEFAULT_STATE.partCullRange)
+			Rayfield.Flags["playerCullRange"]:Set(DEFAULT_STATE.playerCullRange)
+			Rayfield.Flags["graphics"]:Set(false)
+			Rayfield.Flags["particles"]:Set(false)
+			Rayfield.Flags["decals"]:Set(false)
+			Rayfield.Flags["shadows"]:Set(false)
+			Rayfield.Flags["billboards"]:Set(false)
+			Rayfield.Flags["partCull"]:Set(false)
+			Rayfield.Flags["playerCull"]:Set(false)
+			Rayfield.Flags["renderDistance"]:Set(false)
+			Rayfield.Flags["textureQuality"]:Set(false)
+		end)
+
 		saveConfig()
 		refreshPresetStatus()
 		Rayfield:Notify({ Title = "Reset", Content = "All optimizations off", Duration = 3 })
