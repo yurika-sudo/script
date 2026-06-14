@@ -234,15 +234,18 @@ local function applyDecals(enabled)
 end
 
 local function applyRenderDistance(enabled)
-	-- Clamps workspace render fidelity at client level. Only affects the local
-	-- client; does not change server-side StreamingEnabled config.
-	if enabled then
-		workspace.StreamingMinRadius = 64
-		workspace.StreamingTargetRadius = 128
-	else
-		workspace.StreamingMinRadius = 128
-		workspace.StreamingTargetRadius = 512
-	end
+	-- StreamingMinRadius/TargetRadius only writable when StreamingEnabled is true.
+	-- Non-streaming games throw on write; bail early to avoid callback errors.
+	if not workspace.StreamingEnabled then return end
+	pcall(function()
+		if enabled then
+			workspace.StreamingMinRadius    = 64
+			workspace.StreamingTargetRadius = 128
+		else
+			workspace.StreamingMinRadius    = 128
+			workspace.StreamingTargetRadius = 512
+		end
+	end)
 end
 
 local function applyTextureQuality(enabled)
@@ -815,6 +818,44 @@ DebugTab:CreateButton({
 		})
 	end,
 })
+
+DebugTab:CreateButton({
+	Name        = "Ping Check",
+	Description = "Measures round-trip latency to the server over 10 samples (~2s).",
+	Callback = function()
+		debugLabel:Set({ Title = "Ping Check", Content = "Sampling..." })
+		local stats = game:GetService("Stats")
+		local samples, conn = {}, nil
+		local elapsed = 0
+		conn = RunService.Heartbeat:Connect(function(dt)
+			elapsed += dt
+			-- Stats.Network.ServerStatsItem["Data Ping"] gives the current ping in ms
+			local ok, ping = pcall(function()
+				return stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+			end)
+			if ok then table.insert(samples, ping) end
+			if elapsed >= 2 or #samples >= 10 then
+				conn:Disconnect()
+				if #samples == 0 then
+					debugLabel:Set({ Title = "Ping Check", Content = "Ping data unavailable on this server." })
+					return
+				end
+				local sum, mn, mx = 0, math.huge, 0
+				for _, v in ipairs(samples) do
+					sum += v
+					if v < mn then mn = v end
+					if v > mx then mx = v end
+				end
+				local avg = math.floor(sum / #samples)
+				debugLabel:Set({
+					Title   = "Ping Check",
+					Content = "Avg: " .. avg .. " ms  |  Min: " .. math.floor(mn) .. "  Max: " .. math.floor(mx) .. "\n(" .. #samples .. " samples)",
+				})
+			end
+		end)
+	end,
+})
+
 
 -- initial status update after UI is fully built
 refreshPresetStatus()
